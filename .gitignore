@@ -2,8 +2,17 @@ __pycache__/
 *.pyc
 *.pyo
 venv/
+.venv/
 .env
 *.db
 .DS_Store
 *.mp4
 *.mov
+
+# Real-ESRGAN binary — download from https://github.com/xinntao/Real-ESRGAN/releases
+enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos/
+enhance-ai/realesrgan-macos.zip
+
+# C++ submodule stubs (not initialized)
+enhance-ai/src/ncnn/
+enhance-ai/src/libwebp/
