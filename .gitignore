@@ -9,9 +9,8 @@ venv/
 *.mp4
 *.mov
 
-# Real-ESRGAN binary — download from https://github.com/xinntao/Real-ESRGAN/releases
+# Real-ESRGAN extracted binary (unzip realesrgan-macos.zip to create)
 enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos/
-enhance-ai/realesrgan-macos.zip
 
 # C++ submodule stubs (not initialized)
 enhance-ai/src/ncnn/
