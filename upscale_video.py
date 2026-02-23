@@ -161,7 +161,7 @@ def parse_cli_overrides(argv: Sequence[str]) -> set[str]:
     """Return canonical option names explicitly provided by the caller."""
     option_to_key = {
         "--profile": "profile",
-        "--model": "model",
+        "--type": "type_alias",
         "-m": "model",
         "--tta": "tta",
         "--temporal-filter": "temporal_filter",
@@ -191,7 +191,6 @@ def apply_quality_profile(args: argparse.Namespace, cli_overrides: set[str]) -> 
         return
 
     profile_defaults: dict[str, object] = {
-        "model": "realesrgan-x4plus",
         "tta": True,
         "temporal_filter": "strong",
         "preset": "veryslow",
@@ -199,6 +198,10 @@ def apply_quality_profile(args: argparse.Namespace, cli_overrides: set[str]) -> 
         "upscale_mode": "auto",
         "audio_bitrate": "256k",
     }
+
+    if "model" not in cli_overrides and "type_alias" not in cli_overrides:
+        # Default model logic when no explicit profile is requested
+        profile_defaults["model"] = "realesrgan-x4plus"
 
     for key, value in profile_defaults.items():
         if key not in cli_overrides:
@@ -580,6 +583,7 @@ def build_workspace_fingerprint(
         "input": input_identity,
         "profile": args.profile,
         "scale": args.scale,
+        "type": args.type_alias,
         "model": args.model,
         "gpu": args.gpu,
         "tile_size": args.tile_size,
@@ -1947,11 +1951,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Upscaling factor",
     )
     parser.add_argument(
+        "--type",
+        dest="type_alias",
+        type=str,
+        default="real-life",
+        choices=("real-life", "animation"),
+        help="Video content type (determines underlying AI model)",
+    )
+    parser.add_argument(
         "-m",
         "--model",
         type=str,
-        default="realesrgan-x4plus",
-        help="Model name",
+        default=None,
+        help=argparse.SUPPRESS,  # Hidden advanced override
     )
     parser.add_argument(
         "--profile",
@@ -2871,6 +2883,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = parse_args(raw_argv)
+
+    # Map content type to underlying model unless explicitly overridden by hidden flag
+    if not args.model:
+        if args.type_alias == "animation":
+            args.model = "realesrgan-x4plus-anime"
+        else:
+            args.model = "realesrgan-x4plus"
+
     cli_overrides = parse_cli_overrides(raw_argv)
     apply_quality_profile(args, cli_overrides)
     try:

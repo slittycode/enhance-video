@@ -1,66 +1,65 @@
-# Enhance AI Video Upscaler
+# Enhance Video CLI (v1)
 
-Local Real-ESRGAN video upscaler tuned for Apple machines with a quality-first default profile.
+A production-grade, local Real-ESRGAN video upscaler tuned for Apple machines. This CLI provides a robust pipeline with a quality-first default profile, scene-adaptive processing, runtime guardrails, resume-safe workspaces, and a multi-stage quality fallback ladder.
 
-## Requirements
+## Prerequisites
 
-- Python 3.11+
-- `ffmpeg` and `ffprobe` in `PATH`
-- `tqdm` in your Python environment
-- `realesrgan-ncnn-vulkan` binary (auto-detected from bundled vendor directory — e.g. `enhance-ai/realesrgan-ncnn-v0.2.0-macos` in this repo)
+- **Python 3.11+**
+- **ffmpeg & ffprobe**: Must be installed and available in your system `PATH`.
+  ```bash
+  brew install ffmpeg
+  ```
+- **Real-ESRGAN (vulkan)**: The `realesrgan-ncnn-vulkan` binary is auto-detected from the bundled vendor directory (e.g. `enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos`).
+
+## Installation
+
+Install the package globally in editable mode directly from the project directory. This enables the `enhance-video` command system-wide.
+
+```bash
+cd path/to/project/enhance-ai
+pip install -e .
+```
+
+*Note: The installation will automatically pull in the required `tqdm` dependency.*
 
 ## Quick Start
 
-Use the project venv:
+Upscale a real-life (or photographic) video to 4x resolution, prioritizing maximum quality (this is the default behavior):
 
 ```bash
-./.venv/bin/python upscale_video.py --help
+enhance-video input.mp4 --output output.mp4
 ```
 
-### Tracing
-
-The tool includes optional OpenTelemetry tracing so you can profile runtime behavior.
-Install tracing dependencies from `requirements.txt` and then start the AI Toolkit trace
-collector (`ai-mlstudio.tracing.open`). Spans will be exported to
-`http://localhost:4318`.
+To upscale 2D animation or cartoons, which require a specialized AI model to keep edges crisp:
 
 ```bash
-# install dependencies (venv active)
-pip install -r requirements.txt
-# open trace viewer from VS Code command palette: "AI Toolkit: Open tracing"
-# then run the script as usual; spans appear in the trace viewer
-./.venv/bin/python upscale_video.py input.mp4 --output output.mp4
+enhance-video input.mp4 --type animation
 ```
 
-## Flow 1: Max Quality
+## Core Workflows & Examples
 
-Use this when image quality is the absolute priority.
+### 1. Max Quality (Default)
+
+Use this when image quality is the absolute priority. The default profile (`max_quality`) applies strict, high-fidelity settings.
 
 ```bash
-./.venv/bin/python upscale_video.py \
-  input.mp4 \
-  --output input_upscaled_maxq.mp4 \
-  --scale 2
+enhance-video input.mp4 --scale 2 --type real-life
 ```
 
-Defaults under `max_quality` profile:
+**Under the hood (defaults for `max_quality` profile):**
+- **Model Type**: `realesrgan-x4plus` (real-life) or `realesrgan-x4plus-anime` (animation)
+- **TTA (Test-Time Augmentation)**: Enabled
+- **Temporal Filter**: `strong`
+- **x264 Preset**: `veryslow`
+- **CRF**: `14`
 
-- model: `realesrgan-x4plus`
-- TTA: enabled
-- temporal filter: `strong`
-- x264 preset: `veryslow`
-- CRF: `14`
+### 2. Guardrailed Upscaling (Auto-Fallback)
 
-## Flow 2: Max Quality with Runtime Guardrail
-
-Use this when you still want max quality, but want automatic fallback if runtime is projected to exceed a limit.
+If you want maximum quality but need the upscaling to finish within a specific timeframe (e.g., overnight), use the runtime guardrail.
 
 ```bash
-./.venv/bin/python upscale_video.py \
-  input.mp4 \
-  --output input_upscaled_guarded.mp4 \
-  --scale 2 \
-  --runtime-guardrail-hours 72 \
+enhance-video input.mp4 \
+  --runtime-guardrail-hours 12 \
   --runtime-sample-frames 12
 ```
 
@@ -81,72 +80,59 @@ The runtime guardrail now learns your machine performance automatically.
 Optional controls:
 
 ```bash
---calibration-file /path/to/runtime_calibration.json
---reset-calibration
-```
-
-## Resume / Retry Workflow
-
-Use a persistent workspace to reuse extracted and upscaled frames:
-
-```bash
-./.venv/bin/python upscale_video.py \
-  input.mp4 \
-  --output input_upscaled_resume.mp4 \
-  --work-dir /tmp/enhance_ai_workspace
-```
-
-Workspace safety:
-
-- A manifest fingerprint is stored in workspace.
-- If input/settings mismatch is detected, stale cached artifacts are invalidated automatically.
-
-## Scene-Adaptive Ladder (Hard Mode)
-
-Use this when you want per-scene quality adaptation under a runtime cap.
-
-```bash
-./.venv/bin/python upscale_video.py \
-  input.mp4 \
-  --output input_upscaled_scene_adaptive.mp4 \
+enhance-video input.mp4 \
   --scene-adaptive \
   --scene-threshold 0.35 \
-  --scene-min-frames 24 \
-  --scene-sample-frames 4 \
-  --runtime-guardrail-hours 72
+  --runtime-guardrail-hours 24
 ```
 
-Behavior:
+**Behavior:**
+- Cuts the video into logical scenes.
+- Computes a "texture score" for each scene. High-detail/texture scenes preserve more budget for maximum quality, while smooth/static scenes fallback faster to save time.
+- Upscales scene chunks independently, concatenates them, and muxes the audio back in seamlessly.
 
-- Detects scene boundaries and builds merged scene ranges.
-- Uses a quality-first ladder per scene (same ladder as global guardrail under `max_quality`).
-- Computes texture score per scene and biases runtime budget toward texture-heavy scenes.
-- Uses calibration-backed runtime estimates when available.
-- Upscales scene-by-scene, renders scene chunks, concatenates, then remuxes audio.
-- Auto-cleans scene chunk artifacts by default (`--keep-scene-chunks` disables cleanup).
+### 4. Resume & Retry Workflows
 
-### Plan-Only JSON Preflight
-
-Use this to inspect strategy before running expensive upscales.
+If an upscale halts mid-way or crashes (e.g., power loss), you can resume exactly where it left off by persisting the workspace.
 
 ```bash
-./.venv/bin/python upscale_video.py \
-  input.mp4 \
-  --scene-adaptive \
-  --plan-only > plan.json
+enhance-video input.mp4 \
+  --work-dir /path/to/my_workspace
 ```
 
-`--plan-only` emits structured JSON with scene ranges, texture scores, selected candidates, and projected runtimes.
+A fingerprint is maintained in the workspace. If you resume with identical settings, it skips already-extracted and already-upscaled frames. If settings change, the cache safely invalidates.
 
-## Common Flags
+### 5. Preflight (Plan-Only) & Dry-Run
 
-- `--profile custom` to opt out of quality profile defaults.
-- `--disable-runtime-guardrail` to skip estimation.
-- `--force` to re-extract/re-upscale everything.
-- `--temporal-filter {none,light,medium,strong}` to control anti-flicker pass.
-- `--cleanup-work-dir` to remove workdir artifacts after run.
-- `--runtime-sample-frames N` to control estimator sample depth.
-- `--scene-adaptive` to enable per-scene guardrail decisions.
-- `--texture-priority` to bias per-scene budget toward detail-heavy scenes.
-- `--keep-scene-chunks` to keep intermediate scene chunk files.
-- `--plan-only` to print preflight JSON and skip upscale/reassembly.
+Inspect what the tool *will* do without executing the heavy lifting:
+
+**Dry Run:** Prints the exact underlying `ffmpeg` and `realesrgan` commands that would be executed.
+```bash
+enhance-video input.mp4 --dry-run
+```
+
+**Plan-Only (JSON):** Ideal for scripting. Emits a structured JSON plan detailing scene boundaries, candidate selections, and runtime projections.
+```bash
+enhance-video input.mp4 --scene-adaptive --plan-only > plan.json
+```
+
+## Useful Flags
+
+- `--profile custom` - Opt out of the `max_quality` defaults and supply your own parameter combinations.
+- `--type {real-life,animation}` - Specify the video content type to use the correct AI model. Real-life uses the standard model, while animation uses a model tailored for flat artwork and sharp vector edges (default: `real-life`).
+- `--scale {2,3,4}` - Upscale factor (default: `4`).
+- `--disable-runtime-guardrail` - Skip estimation entirely and force the defined settings regardless of how long it takes.
+- `--force` - Ignore cached frames and re-upscale everything.
+- `--jobs` - Real-ESRGAN thread tuple (e.g., `2:2:2` for load:proc:save).
+- `--cleanup-work-dir` - Automatically delete intermediate artifacts when the run completes.
+
+## Tracing & Profiling (Optional)
+
+The tool includes instrumentation via OpenTelemetry to trace runtime stage durations.
+
+1. Install optional telemetry dependencies:
+   ```bash
+   pip install -e ".[telemetry]"
+   ```
+2. Open a local trace collector/viewer (e.g., AI Toolkit's tracing pane or an OTLP endpoint running on `localhost:4318`).
+3. Run `enhance-video` normally. Spans like `extract_frames`, `run_upscale_batch`, and `reassemble_video` will automatically export to your viewer.
