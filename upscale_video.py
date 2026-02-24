@@ -62,6 +62,12 @@ except ImportError:  # silence if not installed; tracing is optional
 
 tracer = None
 
+
+def natural_key(s: str) -> list[int | str]:
+    """Natural sorting key that splits digits from text."""
+    return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', s)]
+
+
 def init_tracing() -> None:
     """Configure OpenTelemetry tracer to export spans to localhost OTLP endpoint."""
     global tracer
@@ -373,7 +379,7 @@ def ensure_input_frames(
     force: bool,
 ) -> int:
     """Reuse cached frames when possible, otherwise extract frames."""
-    existing_frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+    existing_frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key)
     if existing_frames and not force:
         print(f"Reusing {len(existing_frames)} existing extracted frame(s).")
         return len(existing_frames)
@@ -881,7 +887,7 @@ def estimate_candidate_runtime(
     candidate: GuardrailCandidate,
     workspace_root: Path,
 ) -> RuntimeEstimate:
-    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key)
     return estimate_candidate_runtime_for_frames(
         toolchain,
         frames=frames,
@@ -1109,7 +1115,7 @@ def run_upscale_frame_mode(
     target_width: int,
     target_height: int,
 ) -> None:
-    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key)
     if not frames:
         raise RuntimeError("No input frames found for upscaling.")
 
@@ -1505,7 +1511,7 @@ def run_upscale_scene_adaptive(
     codec: str = "h264",
 ) -> SceneAdaptiveResult:
     """Upscale frames scene-by-scene, render chunk videos, and concatenate."""
-    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key)
     if not frames:
         raise RuntimeError("No input frames found for scene-adaptive upscaling.")
     if not scene_plan:
@@ -1943,7 +1949,7 @@ def run_plan_only(args: argparse.Namespace) -> int:
             if not scene_ranges:
                 scene_ranges = [(1, frame_count)]
 
-            frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+            frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key)
             candidates = build_scene_adaptive_candidates(args)
             scene_plan = plan_scene_adaptive_strategy(
                 toolchain,

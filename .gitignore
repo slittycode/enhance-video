@@ -8,6 +8,18 @@ venv/
 .DS_Store
 *.mp4
 *.mov
+*.mkv
+*.avi
+
+# Pipeline workspace (extracted/upscaled frames)
+workspace/
+input_frames/
+upscaled_frames/
+frame_*.jpg
+frame_*.png
+
+# Test fixtures (generated video)
+tests/fixtures/*.mp4
 
 # Real-ESRGAN extracted binary (unzip realesrgan-macos.zip to create)
 enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos/
