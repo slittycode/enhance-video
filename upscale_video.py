@@ -11,10 +11,8 @@ import argparse
 import contextlib
 import functools
 import json
-import hashlib
 import io
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -63,9 +61,11 @@ except ImportError:  # silence if not installed; tracing is optional
 tracer = None
 
 
-def natural_key(s: str) -> list[int | str]:
+def natural_key(s: Path | str) -> list[int | str]:
     """Natural sorting key that splits digits from text."""
-    return [int(text) if text.isdigit() else text for text in re.split(r'(\d+)', s)]
+    # Convert Path to string if needed
+    s_str = str(s)
+    return [int(text) if text.isdigit() else text for text in re.split(r"(\d+)", s_str)]
 
 
 def init_tracing() -> None:
@@ -78,14 +78,21 @@ def init_tracing() -> None:
 
     resource = Resource.create({"service.name": "enhance-ai-video-upscaler"})
     provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    try:
+        if os.environ.get("ENABLE_OTLP_TRACING") == "1":
+            # We try to export to a local tempo/jaeger instance
+            exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+    except Exception:
+        pass  # silently fail if OTLP is not available
+
     trace.set_tracer_provider(provider)
     tracer = trace.get_tracer(__name__)
 
 
 def _traced(func):
     """Decorator that wraps a function call in a tracing span if tracing is enabled."""
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if tracer is None:
@@ -99,12 +106,60 @@ def _traced(func):
 
 
 try:
-    from tqdm import tqdm as _tqdm
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        BarColumn,
+        TextColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+    from rich.console import Console
+
+    _console = Console()
+    _RICH_AVAILABLE = True
 except ImportError:
-    def _tqdm(iterable=None, **_kwargs):
-        if iterable is None:
-            return []
-        return iterable
+    _RICH_AVAILABLE = False
+    _console = None
+
+
+@contextlib.contextmanager
+def frame_progress(total: int, description: str = "Processing"):
+    """Yield a progress-advance callback, backed by rich or a no-op."""
+    if _RICH_AVAILABLE:
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        )
+        with progress:
+            task = progress.add_task(description, total=total)
+
+            def advance():
+                progress.advance(task)
+
+            yield advance
+    else:
+
+        def noop():
+            pass
+
+        yield noop
+
+
+@contextlib.contextmanager
+def spinner(message: str):
+    """Show an animated spinner while a blocking operation runs."""
+    if _RICH_AVAILABLE and _console is not None:
+        with _console.status(message, spinner="dots"):
+            yield
+    else:
+        print(message)
+        yield
 
 
 DEFAULT_FPS = 30.0
@@ -115,10 +170,6 @@ INPUT_FRAME_PATTERN = "frame_%08d.jpg"
 INPUT_FRAME_GLOB = "frame_*.jpg"
 OUTPUT_FRAME_PATTERN = "frame_%08d.png"
 OUTPUT_FRAME_GLOB = "frame_*.png"
-
-
-
-
 
 
 @dataclass(frozen=True)
@@ -169,9 +220,6 @@ class SceneAdaptiveResult:
     chunk_count: int
 
 
-
-
-
 def parse_framerate(value: str) -> float:
     """Parse ffprobe framerate strings like 30000/1001 safely."""
     if not value:
@@ -192,10 +240,6 @@ def parse_framerate(value: str) -> float:
     if framerate <= 0 or framerate > 240:
         return DEFAULT_FPS
     return framerate
-
-
-
-
 
 
 def get_video_info(ffprobe_bin: str, input_video: Path) -> VideoInfo:
@@ -237,9 +281,7 @@ def get_video_info(ffprobe_bin: str, input_video: Path) -> VideoInfo:
     height = int(video_stream.get("height", DEFAULT_HEIGHT))
     audio_codec = audio_stream.get("codec_name") if audio_stream else None
     duration_raw = (
-        video_stream.get("duration")
-        or payload.get("format", {}).get("duration")
-        or "0"
+        video_stream.get("duration") or payload.get("format", {}).get("duration") or "0"
     )
     try:
         duration_seconds = max(float(duration_raw), 0.0)
@@ -618,11 +660,7 @@ def build_scene_ranges(
         return []
 
     valid_boundaries = sorted(
-        {
-            boundary
-            for boundary in boundaries
-            if 1 <= boundary < total_frames
-        }
+        {boundary for boundary in boundaries if 1 <= boundary < total_frames}
     )
     ranges: list[tuple[int, int]] = []
     start = 1
@@ -684,7 +722,7 @@ def build_scene_texture_scores(
 ) -> list[float]:
     raw_scores: list[float] = []
     for start, end in scene_ranges:
-        scene_frames = frames[max(start - 1, 0):min(end, len(frames))]
+        scene_frames = frames[max(start - 1, 0) : min(end, len(frames))]
         raw_scores.append(compute_scene_texture_raw(scene_frames, sample_size))
     return normalize_scores(raw_scores)
 
@@ -709,7 +747,9 @@ def select_scene_candidate_by_projection(
     if not candidates:
         raise ValueError("No candidates provided for scene selection.")
 
-    effective_budget = budget_seconds * get_texture_weight(texture_score, texture_priority)
+    effective_budget = budget_seconds * get_texture_weight(
+        texture_score, texture_priority
+    )
     for candidate in candidates:
         projected = projected_seconds_by_name.get(candidate.name)
         if projected is None:
@@ -739,7 +779,10 @@ def detect_scene_boundaries(
         "-",
     ]
     result = run_subprocess(cmd, check=False, capture_output=True)
-    if result.returncode not in (0, 255):  # ffmpeg sometimes emits 255 on benign exit paths
+    if result.returncode not in (
+        0,
+        255,
+    ):  # ffmpeg sometimes emits 255 on benign exit paths
         return []
 
     pts_pattern = re.compile(r"pts_time:\s*([0-9.]+)")
@@ -833,7 +876,9 @@ def build_guardrail_candidates(args: argparse.Namespace) -> list[GuardrailCandid
     return deduped
 
 
-def build_scene_adaptive_candidates(args: argparse.Namespace) -> list[GuardrailCandidate]:
+def build_scene_adaptive_candidates(
+    args: argparse.Namespace,
+) -> list[GuardrailCandidate]:
     """Scene-adaptive ladder with quality-first fallbacks."""
     if args.profile == "max_quality":
         return build_guardrail_candidates(args)
@@ -948,7 +993,11 @@ def estimate_candidate_runtime_for_frames(
             )
             result = run_subprocess(cmd, check=False, capture_output=True)
             if result.returncode != 0:
-                stderr = result.stderr.strip() if result.stderr else f"exit={result.returncode}"
+                stderr = (
+                    result.stderr.strip()
+                    if result.stderr
+                    else f"exit={result.returncode}"
+                )
                 raise RuntimeError(f"Runtime estimation failed: {stderr}")
             completed += 1
     finally:
@@ -966,11 +1015,14 @@ def estimate_candidate_runtime_for_frames(
     )
 
 
-def apply_guardrail_candidate(args: argparse.Namespace, candidate: GuardrailCandidate) -> None:
+def apply_guardrail_candidate(
+    args: argparse.Namespace, candidate: GuardrailCandidate
+) -> None:
     args.tta = candidate.tta
     args.temporal_filter = candidate.temporal_filter
     args.preset = candidate.preset
     args.crf = candidate.crf
+
 
 def build_realesrgan_command(
     realesrgan_binary: Path,
@@ -1088,8 +1140,33 @@ def run_upscale_batch(
 
         stderr = result.stderr.strip() if result.stderr else "no stderr"
         is_last = attempt_idx == len(tile_attempts) - 1
+
+        # Check for segfault or crash
+        if result.returncode != 0 and (
+            "segmentation fault" in stderr.lower()
+            or result.returncode == 139
+            or result.returncode == 134
+            or "killed" in stderr.lower()
+        ):
+            progress_write("Detected Real-ESRGAN crash, cleaning partial outputs...")
+            # Clean up any partial outputs before retrying
+            if output_frames_dir.exists():
+                for partial_file in output_frames_dir.glob("*.png"):
+                    try:
+                        partial_file.unlink()
+                    except Exception:
+                        pass
+
         if is_last:
             raise RuntimeError(f"Batch upscale failed: {stderr}")
+
+        # Clean up any partial outputs before retrying with different tile size
+        if output_frames_dir.exists():
+            for partial_file in output_frames_dir.glob("*.png"):
+                try:
+                    partial_file.unlink()
+                except Exception:
+                    pass
 
         next_tile = tile_attempts[attempt_idx + 1]
         progress_write(
@@ -1097,6 +1174,61 @@ def run_upscale_batch(
             f"retrying with tile_size={next_tile}..."
         )
         time.sleep(2)
+
+
+def validate_upscaled_frame(
+    input_frame: Path, output_frame: Path, scale_factor: int
+) -> bool:
+    """Validate that the upscaled frame has correct dimensions and content."""
+    if not output_frame.exists():
+        return False
+
+    # Check file size is reasonable (not empty or suspiciously small)
+    if output_frame.stat().st_size < 1024:  # Less than 1KB is likely corrupted
+        return False
+
+    # Try to validate with ffmpeg
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+                str(output_frame),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            try:
+                width, height = map(int, result.stdout.strip().split(","))
+                # Expected dimensions
+                from PIL import Image
+
+                with Image.open(input_frame) as img:
+                    expected_width = img.width * scale_factor
+                    expected_height = img.height * scale_factor
+
+                if width != expected_width or height != expected_height:
+                    progress_write(
+                        f"Warning: Output frame has wrong dimensions {width}x{height}, expected {expected_width}x{expected_height}"
+                    )
+                    return False
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return True
 
 
 def run_upscale_frame_mode(
@@ -1122,57 +1254,106 @@ def run_upscale_frame_mode(
     failed_frames = 0
     skipped_frames = 0
 
-    for frame in _tqdm(frames, desc="Upscaling", unit="frame"):
-        output_frame = output_frames_dir / frame.name
-        if not force and output_frame.exists() and output_frame.stat().st_size > 0:
-            skipped_frames += 1
-            continue
+    with frame_progress(len(frames), "Upscaling") as advance:
+        for frame_idx, frame in enumerate(frames):
+            # Log frame order for debugging
+            frame_num = (
+                int(re.search(r"frame_(\d+)\.", frame.name).group(1))
+                if re.search(r"frame_(\d+)\.", frame.name)
+                else 0
+            )
+            progress_write(
+                f"Processing frame {frame_num} (position {frame_idx + 1}/{len(frames)})"
+            )
 
-        cmd = build_realesrgan_command(
-            toolchain.realesrgan_binary,
-            frame,
-            output_frame,
-            scale_factor=scale_factor,
-            model_name=model_name,
-            gpu_id=gpu_id,
-            tile_size=tile_size,
-            tta=tta,
-            model_path=toolchain.model_path,
-            jobs=jobs,
-        )
+            output_frame = output_frames_dir / frame.name
+            if not force and output_frame.exists() and output_frame.stat().st_size > 0:
+                skipped_frames += 1
+                continue
 
-        if dry_run:
-            progress_write(f"[DRY RUN] {' '.join(cmd)}")
-            continue
+            cmd = build_realesrgan_command(
+                toolchain.realesrgan_binary,
+                frame,
+                output_frame,
+                scale_factor=scale_factor,
+                model_name=model_name,
+                gpu_id=gpu_id,
+                tile_size=tile_size,
+                tta=tta,
+                model_path=toolchain.model_path,
+                jobs=jobs,
+            )
 
-        succeeded = False
-        result = None
-        for attempt in range(2):
-            try:
-                result = run_subprocess(cmd, check=False, capture_output=True, timeout=300)
-            except subprocess.TimeoutExpired:
-                progress_write(f"Warning: Upscale timed out for {frame.name} (attempt {attempt + 1})")
+            if dry_run:
+                progress_write(f"[DRY RUN] {' '.join(cmd)}")
+                continue
+
+            succeeded = False
+            result = None
+            for attempt in range(2):
+                try:
+                    result = run_subprocess(
+                        cmd, check=False, capture_output=True, timeout=300
+                    )
+                except subprocess.TimeoutExpired:
+                    progress_write(
+                        f"Warning: Upscale timed out for {frame.name} (attempt {attempt + 1})"
+                    )
+                    if attempt == 0:
+                        time.sleep(2)
+                    continue
+                if (
+                    result.returncode == 0
+                    and output_frame.exists()
+                    and output_frame.stat().st_size > 0
+                ):
+                    # Validate the output frame has correct dimensions
+                    if validate_upscaled_frame(frame, output_frame, scale_factor):
+                        succeeded = True
+                        break
+                    else:
+                        # Output is corrupted, remove it and retry
+                        try:
+                            output_frame.unlink()
+                        except Exception:
+                            pass
+                        progress_write(
+                            f"Warning: Frame {frame.name} has corrupted output, retrying..."
+                        )
                 if attempt == 0:
                     time.sleep(2)
-                continue
-            if result.returncode == 0 and output_frame.exists() and output_frame.stat().st_size > 0:
-                succeeded = True
-                break
-            if attempt == 0:
-                time.sleep(2)
-        if succeeded:
-            continue
+            if succeeded:
+                # Log successful completion with checksum
+                try:
+                    import hashlib
 
-        failed_frames += 1
-        stderr = result.stderr.strip() if hasattr(result, "stderr") and result.stderr else "timed out or unknown error"
-        progress_write(f"Warning: AI upscale failed for {frame.name}: {stderr}")
-        fallback_resize_frame(
-            toolchain.ffmpeg,
-            frame,
-            output_frame,
-            target_width=target_width,
-            target_height=target_height,
-        )
+                    with open(output_frame, "rb") as f:
+                        checksum = hashlib.md5(f.read()).hexdigest()
+                    progress_write(
+                        f"  ✓ Frame {frame_num} completed (checksum: {checksum[:8]}...)"
+                    )
+                except Exception as e:
+                    progress_write(
+                        f"  ✓ Frame {frame_num} completed (checksum failed: {e})"
+                    )
+                continue
+
+            failed_frames += 1
+            stderr = (
+                result.stderr.strip()
+                if hasattr(result, "stderr") and result.stderr
+                else "timed out or unknown error"
+            )
+            progress_write(f"Warning: AI upscale failed for {frame.name}: {stderr}")
+            fallback_resize_frame(
+                toolchain.ffmpeg,
+                frame,
+                output_frame,
+                target_width=target_width,
+                target_height=target_height,
+            )
+
+        advance()
 
     if skipped_frames:
         print(f"Skipped {skipped_frames} already-upscaled frame(s).")
@@ -1215,11 +1396,13 @@ def plan_scene_adaptive_strategy(
 
     for scene_index, (start, end) in enumerate(scene_ranges):
         scene_number = scene_index + 1
-        scene_frames = frames[max(start - 1, 0):min(end, len(frames))]
+        scene_frames = frames[max(start - 1, 0) : min(end, len(frames))]
         if not scene_frames:
             continue
         scene_frame_count = len(scene_frames)
-        texture_score = texture_scores[scene_index] if scene_index < len(texture_scores) else 0.5
+        texture_score = (
+            texture_scores[scene_index] if scene_index < len(texture_scores) else 0.5
+        )
 
         scene_budget: Optional[float] = None
         if remaining_guardrail is not None:
@@ -1240,7 +1423,9 @@ def plan_scene_adaptive_strategy(
                     texture_score,
                     texture_priority,
                 )
-                proportional_budget = remaining_guardrail * (scene_weight / remaining_weight)
+                proportional_budget = remaining_guardrail * (
+                    scene_weight / remaining_weight
+                )
                 scene_budget = max(0.0, proportional_budget * scene_budget_slack)
             else:
                 scene_budget = max(0.0, remaining_guardrail)
@@ -1359,15 +1544,17 @@ def render_scene_chunk(
         str(frame_count),
     ]
     cmd.extend(get_codec_flags(codec, preset, crf))
-    cmd.extend([
-        "-pix_fmt",
-        "yuv420p",
-        str(chunk_path),
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-    ])
+    cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            str(chunk_path),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+        ]
+    )
     run_subprocess(cmd)
 
 
@@ -1422,15 +1609,17 @@ def concat_scene_chunks(
         str(concat_list),
     ]
     reencode_cmd.extend(get_codec_flags(codec, preset, crf))
-    reencode_cmd.extend([
-        "-pix_fmt",
-        "yuv420p",
-        str(output_video),
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-    ])
+    reencode_cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            str(output_video),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+        ]
+    )
     run_subprocess(reencode_cmd)
     return concat_list
 
@@ -1448,15 +1637,24 @@ def mux_audio_to_video(
         # Try stream-copy first (lossless, fast).
         copy_cmd = [
             ffmpeg_bin,
-            "-i", str(video_path),
-            "-i", str(audio_path),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "copy",
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
             "-shortest",
             str(output_video),
-            "-y", "-hide_banner", "-loglevel", "warning",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
         ]
         copy_result = run_subprocess(copy_cmd, check=False, capture_output=True)
         if copy_result.returncode == 0 and output_video.exists():
@@ -1465,16 +1663,26 @@ def mux_audio_to_video(
         # Fallback: transcode audio to AAC for container compatibility.
         transcode_cmd = [
             ffmpeg_bin,
-            "-i", str(video_path),
-            "-i", str(audio_path),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", audio_bitrate,
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_bitrate,
             "-shortest",
             str(output_video),
-            "-y", "-hide_banner", "-loglevel", "warning",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
         ]
         run_subprocess(transcode_cmd)
         return
@@ -1532,7 +1740,7 @@ def run_upscale_scene_adaptive(
         scene_number = plan_entry.scene_number
         start = plan_entry.start_frame
         end = plan_entry.end_frame
-        scene_frames = frames[max(start - 1, 0):min(end, len(frames))]
+        scene_frames = frames[max(start - 1, 0) : min(end, len(frames))]
         if not scene_frames:
             continue
         scene_frame_count = len(scene_frames)
@@ -1540,8 +1748,12 @@ def run_upscale_scene_adaptive(
         selected_index = candidate_index_by_name.get(selected_candidate.name, 0)
         worst_candidate_index = max(worst_candidate_index, selected_index)
 
-        selected_projection = plan_entry.projected_seconds_by_name.get(selected_candidate.name)
-        selected_source = plan_entry.source_by_name.get(selected_candidate.name, "default")
+        selected_projection = plan_entry.projected_seconds_by_name.get(
+            selected_candidate.name
+        )
+        selected_source = plan_entry.source_by_name.get(
+            selected_candidate.name, "default"
+        )
         if plan_entry.budget_seconds is None:
             budget_text = "n/a"
         else:
@@ -1564,44 +1776,95 @@ def run_upscale_scene_adaptive(
         scene_start = time.time()
         processed_scene = 0
 
-        for frame in _tqdm(scene_frames, desc=f"Scene {scene_number}", unit="frame"):
-            output_frame = output_frames_dir / frame.name
-            if not force and output_frame.exists() and output_frame.stat().st_size > 0:
-                total_skipped += 1
-                continue
+        with frame_progress(len(scene_frames), f"Scene {scene_number}") as advance:
+            for frame_idx, frame in enumerate(scene_frames):
+                # Log frame order for debugging
+                frame_num = (
+                    int(re.search(r"frame_(\d+)\.", frame.name).group(1))
+                    if re.search(r"frame_(\d+)\.", frame.name)
+                    else 0
+                )
+                progress_write(
+                    f"Scene {scene_number}: Processing frame {frame_num} (position {frame_idx + 1}/{len(scene_frames)})"
+                )
 
-            cmd = build_realesrgan_command(
-                toolchain.realesrgan_binary,
-                frame,
-                output_frame,
-                scale_factor=scale_factor,
-                model_name=model_name,
-                gpu_id=gpu_id,
-                tile_size=tile_size,
-                tta=selected_candidate.tta,
-                model_path=toolchain.model_path,
-                jobs=jobs,
-            )
+                output_frame = output_frames_dir / frame.name
+                if (
+                    not force
+                    and output_frame.exists()
+                    and output_frame.stat().st_size > 0
+                ):
+                    total_skipped += 1
+                    continue
 
-            if dry_run:
-                progress_write(f"[DRY RUN] {' '.join(cmd)}")
-                continue
+                cmd = build_realesrgan_command(
+                    toolchain.realesrgan_binary,
+                    frame,
+                    output_frame,
+                    scale_factor=scale_factor,
+                    model_name=model_name,
+                    gpu_id=gpu_id,
+                    tile_size=tile_size,
+                    tta=selected_candidate.tta,
+                    model_path=toolchain.model_path,
+                    jobs=jobs,
+                )
 
-            result = run_subprocess(cmd, check=False, capture_output=True)
-            if result.returncode == 0 and output_frame.exists() and output_frame.stat().st_size > 0:
-                processed_scene += 1
-                continue
+                if dry_run:
+                    progress_write(f"[DRY RUN] {' '.join(cmd)}")
+                    continue
 
-            total_failed += 1
-            stderr = result.stderr.strip() if result.stderr else f"exit={result.returncode}"
-            progress_write(f"Warning: Scene upscale failed for {frame.name}: {stderr}")
-            fallback_resize_frame(
-                toolchain.ffmpeg,
-                frame,
-                output_frame,
-                target_width=target_width,
-                target_height=target_height,
-            )
+                result = run_subprocess(cmd, check=False, capture_output=True)
+                if (
+                    result.returncode == 0
+                    and output_frame.exists()
+                    and output_frame.stat().st_size > 0
+                ):
+                    # Validate the output frame has correct dimensions
+                    if validate_upscaled_frame(frame, output_frame, scale_factor):
+                        # Log successful completion with checksum
+                        try:
+                            import hashlib
+
+                            with open(output_frame, "rb") as f:
+                                checksum = hashlib.md5(f.read()).hexdigest()
+                            progress_write(
+                                f"  ✓ Scene {scene_number} frame {frame_num} completed (checksum: {checksum[:8]}...)"
+                            )
+                        except Exception as e:
+                            progress_write(
+                                f"  ✓ Scene {scene_number} frame {frame_num} completed (checksum failed: {e})"
+                            )
+                        processed_scene += 1
+                        continue
+                    else:
+                        # Output is corrupted, remove it
+                        try:
+                            output_frame.unlink()
+                        except Exception:
+                            pass
+                        progress_write(
+                            f"Warning: Scene {scene_number} frame {frame.name} has corrupted output"
+                        )
+
+                total_failed += 1
+                stderr = (
+                    result.stderr.strip()
+                    if result.stderr
+                    else f"exit={result.returncode}"
+                )
+                progress_write(
+                    f"Warning: Scene upscale failed for {frame.name}: {stderr}"
+                )
+                fallback_resize_frame(
+                    toolchain.ffmpeg,
+                    frame,
+                    output_frame,
+                    target_width=target_width,
+                    target_height=target_height,
+                )
+
+            advance()
 
         scene_elapsed = max(time.time() - scene_start, 1e-6)
         if processed_scene > 0 and not dry_run:
@@ -1763,17 +2026,19 @@ def apply_temporal_filter(
         "0:a?",
     ]
     cmd.extend(get_codec_flags(codec, preset, crf))
-    cmd.extend([
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "copy",
-        str(output_video),
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-    ])
+    cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            str(output_video),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+        ]
+    )
     run_subprocess(cmd)
 
 
@@ -1786,10 +2051,6 @@ def format_time(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {secs:.1f}s"
     return f"{secs:.1f}s"
-
-
-
-
 
 
 def check_disk_space(
@@ -1847,8 +2108,12 @@ def serialize_scene_plan(scene_plan: list[ScenePlanEntry]) -> list[dict[str, obj
                 "texture_score": round(entry.texture_score, 6),
                 "budget_seconds": entry.budget_seconds,
                 "selected_candidate": selected_name,
-                "selected_projected_seconds": entry.projected_seconds_by_name.get(selected_name),
-                "selected_projection_source": entry.source_by_name.get(selected_name, "default"),
+                "selected_projected_seconds": entry.projected_seconds_by_name.get(
+                    selected_name
+                ),
+                "selected_projection_source": entry.source_by_name.get(
+                    selected_name, "default"
+                ),
                 "candidate_projected_seconds": entry.projected_seconds_by_name,
                 "candidate_projection_sources": entry.source_by_name,
             }
@@ -1871,7 +2136,11 @@ def run_plan_only(args: argparse.Namespace) -> int:
     toolchain = resolve_toolchain(args)
     machine_id = get_machine_id()
     calibration_path = Path(args.calibration_file).expanduser().resolve()
-    calibration = {"entries": {}} if args.reset_calibration else load_calibration(calibration_path)
+    calibration = (
+        {"entries": {}}
+        if args.reset_calibration
+        else load_calibration(calibration_path)
+    )
 
     workspace_root, should_cleanup_workspace = prepare_workspace(
         args.work_dir,
@@ -1886,12 +2155,16 @@ def run_plan_only(args: argparse.Namespace) -> int:
     try:
         info = get_video_info(toolchain.ffprobe, input_video)
         with contextlib.redirect_stdout(io.StringIO()):
-            frame_count = ensure_input_frames(
-                toolchain.ffmpeg,
-                input_video,
-                input_frames_dir,
-                args.force,
-            )
+            print("Extracting frames...")
+            step_start = time.time()
+            with spinner("Extracting frames..."):
+                frame_count = ensure_input_frames(
+                    toolchain.ffmpeg,
+                    input_video,
+                    input_frames_dir,
+                    args.force,
+                )
+            print(f"  Time: {format_time(time.time() - step_start)}\n")
 
         guardrail_seconds: Optional[float] = None
         if not args.disable_runtime_guardrail:
@@ -1922,7 +2195,9 @@ def run_plan_only(args: argparse.Namespace) -> int:
                 "crf": args.crf,
                 "scene_adaptive": bool(args.scene_adaptive),
                 "runtime_guardrail_hours": (
-                    None if args.disable_runtime_guardrail else args.runtime_guardrail_hours
+                    None
+                    if args.disable_runtime_guardrail
+                    else args.runtime_guardrail_hours
                 ),
                 "scene_threshold": args.scene_threshold,
                 "scene_min_frames": args.scene_min_frames,
@@ -2048,7 +2323,9 @@ def run_plan_only(args: argparse.Namespace) -> int:
                         "temporal_filter": candidate.temporal_filter,
                         "preset": candidate.preset,
                         "crf": candidate.crf,
-                        "projected_seconds": estimate.projected_seconds if estimate else None,
+                        "projected_seconds": estimate.projected_seconds
+                        if estimate
+                        else None,
                         "source": estimate.source if estimate else "disabled",
                     }
                 )
@@ -2092,7 +2369,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
     toolchain = resolve_toolchain(args)
     machine_id = get_machine_id()
     calibration_path = Path(args.calibration_file).expanduser().resolve()
-    calibration = {"entries": {}} if args.reset_calibration else load_calibration(calibration_path)
+    calibration = (
+        {"entries": {}}
+        if args.reset_calibration
+        else load_calibration(calibration_path)
+    )
 
     workspace_root, should_cleanup_workspace = prepare_workspace(
         args.work_dir,
@@ -2137,7 +2418,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             f"auto_clean_chunks={'yes' if not args.keep_scene_chunks else 'no'}"
         )
     print(f"Temporal filter: {args.temporal_filter}")
-    print(f"Guardrail: {'disabled' if args.disable_runtime_guardrail else f'{args.runtime_guardrail_hours:.1f}h'}")
+    print(
+        f"Guardrail: {'disabled' if args.disable_runtime_guardrail else f'{args.runtime_guardrail_hours:.1f}h'}"
+    )
     print(f"Machine ID: {machine_id}")
     print(f"Calibration: {calibration_path}")
     print(f"Workspace: {workspace_root}")
@@ -2201,7 +2484,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
             if args.disable_runtime_guardrail:
                 print("Runtime guardrail disabled by flag.\n")
             elif args.dry_run or not needs_upscale_work:
-                print("Runtime guardrail skipped (no upscale work required or dry run).\n")
+                print(
+                    "Runtime guardrail skipped (no upscale work required or dry run).\n"
+                )
             else:
                 scene_guardrail_seconds = args.runtime_guardrail_hours * 3600.0
                 print(
@@ -2209,7 +2494,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     "scene-adaptive upscaling.\n"
                 )
         else:
-            if not args.disable_runtime_guardrail and not args.dry_run and needs_upscale_work:
+            if (
+                not args.disable_runtime_guardrail
+                and not args.dry_run
+                and needs_upscale_work
+            ):
                 guardrail_seconds = args.runtime_guardrail_hours * 3600.0
                 if args.profile == "max_quality":
                     candidates = build_guardrail_candidates(args)
@@ -2260,7 +2549,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                             source="sample",
                         )
                     runtime_estimate = estimate
-                    projected_30m_seconds = (info.framerate * 60.0 * 30.0) / estimate.sample_fps
+                    projected_30m_seconds = (
+                        info.framerate * 60.0 * 30.0
+                    ) / estimate.sample_fps
                     print(
                         f"  Candidate {candidate.name}: "
                         f"{estimate.sample_fps:.2f} fps sampled, "
@@ -2289,7 +2580,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
                         selected_candidate_key = calibration_key
                         break
 
-                if runtime_estimate and runtime_estimate.projected_seconds > guardrail_seconds:
+                if (
+                    runtime_estimate
+                    and runtime_estimate.projected_seconds > guardrail_seconds
+                ):
                     print(
                         f"  Guardrail exceeded ({format_time(runtime_estimate.projected_seconds)} "
                         f"> {format_time(guardrail_seconds)})."
@@ -2312,7 +2606,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     candidate=selected_candidate,
                 )
             else:
-                print("Runtime guardrail skipped (no upscale work required or dry run).\n")
+                print(
+                    "Runtime guardrail skipped (no upscale work required or dry run).\n"
+                )
                 selected_candidate = GuardrailCandidate(
                     name="guardrail_skipped",
                     tta=bool(args.tta),
@@ -2335,9 +2631,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 print(
                     f"  Scene-adaptive ladder: {', '.join(candidate.name for candidate in scene_candidates)}"
                 )
-            planning_frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
+            planning_frames = sorted(
+                input_frames_dir.glob(INPUT_FRAME_GLOB), key=natural_key
+            )
             allow_scene_sampling = (
-                scene_guardrail_seconds is not None and not args.dry_run and needs_upscale_work
+                scene_guardrail_seconds is not None
+                and not args.dry_run
+                and needs_upscale_work
             )
             scene_plan = plan_scene_adaptive_strategy(
                 toolchain,
@@ -2358,10 +2658,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
             )
 
         current_fingerprint = build_workspace_fingerprint(args, input_identity)
-        cache_valid, cache_reason = validate_workspace_cache(manifest_path, current_fingerprint)
+        cache_valid, cache_reason = validate_workspace_cache(
+            manifest_path, current_fingerprint
+        )
         if not cache_valid:
             if cache_reason == "fingerprint mismatch":
-                print("Workspace settings changed. Clearing stale upscaled frame cache.")
+                print(
+                    "Workspace settings changed. Clearing stale upscaled frame cache."
+                )
             clear_output_cache(output_frames_dir, workspace_root)
         else:
             print("Workspace cache fingerprint validated.\n")
@@ -2375,12 +2679,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
         else:
             for stale_audio in cached_audio:
                 stale_audio.unlink(missing_ok=True)
-            audio_path = extract_audio(
-                toolchain.ffmpeg,
-                input_video,
-                workspace_root,
-                has_audio=info.has_audio,
-            )
+            with spinner("Extracting audio..."):
+                audio_path = extract_audio(
+                    toolchain.ffmpeg,
+                    input_video,
+                    workspace_root,
+                    has_audio=info.has_audio,
+                )
         print(f"  Time: {format_time(time.time() - step_start)}\n")
 
         mode = choose_upscale_mode(args.upscale_mode, output_frames_dir, args.force)
@@ -2480,7 +2785,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 )
         upscale_elapsed = time.time() - step_start
         fps_processed = frame_count / upscale_elapsed if upscale_elapsed > 0 else 0.0
-        print(f"  Time: {format_time(upscale_elapsed)} ({fps_processed:.2f} frames/sec)\n")
+        print(
+            f"  Time: {format_time(upscale_elapsed)} ({fps_processed:.2f} frames/sec)\n"
+        )
         if selected_candidate_key and fps_processed > 0:
             update_calibration_entry(
                 calibration,
@@ -2523,28 +2830,30 @@ def run_pipeline(args: argparse.Namespace) -> int:
             raw_output_video = output_video
             if args.temporal_filter != "none":
                 raw_output_video = workspace_root / "reassembled_raw.mp4"
-            reassemble_video(
-                toolchain.ffmpeg,
-                output_frames_dir,
-                raw_output_video,
-                framerate=info.framerate,
-                audio_path=audio_path,
-                crf=args.crf,
-                preset=args.preset,
-                audio_bitrate=args.audio_bitrate,
-                codec=args.codec,
-            )
-            if args.temporal_filter != "none":
-                print("Applying temporal filter...")
-                apply_temporal_filter(
+            with spinner("Encoding final video..."):
+                reassemble_video(
                     toolchain.ffmpeg,
+                    output_frames_dir,
                     raw_output_video,
-                    output_video,
-                    level=args.temporal_filter,
-                    preset=args.preset,
+                    framerate=info.framerate,
+                    audio_path=audio_path,
                     crf=args.crf,
+                    preset=args.preset,
+                    audio_bitrate=args.audio_bitrate,
                     codec=args.codec,
                 )
+            if args.temporal_filter != "none":
+                print("Applying temporal filter...")
+                with spinner("Applying temporal filter..."):
+                    apply_temporal_filter(
+                        toolchain.ffmpeg,
+                        raw_output_video,
+                        output_video,
+                        level=args.temporal_filter,
+                        preset=args.preset,
+                        crf=args.crf,
+                        codec=args.codec,
+                    )
         print(f"  Time: {format_time(time.time() - step_start)}\n")
 
         total_elapsed = time.time() - total_start

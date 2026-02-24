@@ -29,11 +29,11 @@ class Toolchain:
 
 
 def progress_write(message: str) -> None:
-    """Write a progress message using tqdm if available, otherwise print."""
+    """Write a progress message using rich if available, otherwise print."""
     try:
-        from tqdm import tqdm
+        from rich import print as rprint
 
-        tqdm.write(message)
+        rprint(message)
     except ImportError:
         print(message)
 

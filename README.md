@@ -20,7 +20,7 @@ cd path/to/project/enhance-ai
 pip install -e .
 ```
 
-*Note: The installation will automatically pull in the required `tqdm` dependency.*
+*Note: The installation will automatically pull in the required `rich` dependency.*
 
 ## Quick Start
 
