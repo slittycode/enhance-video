@@ -21,4 +21,4 @@ telemetry = [
 enhance-video = "upscale_video:main"
 
 [tool.setuptools]
-py-modules = ["upscale_video"]
+py-modules = ["upscale_video", "cli", "toolchain", "validate_upscale"]

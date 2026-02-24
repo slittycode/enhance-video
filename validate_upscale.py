@@ -601,17 +601,29 @@ def main():
         print(f"ERROR: {e}")
         sys.exit(2)
 
-    # After validation, handle max-flagged and rate exit codes
-    total_flags = sum(summary['flag_counts'].values())
-    flagged_rate = total_flags / summary['frames_processed'] if summary['frames_processed'] > 0 else 0
-    if validator.max_flagged > 0 and total_flags > validator.max_flagged:
-        print(f"\nERROR: Flagged frames {total_flags} exceed max-flagged {validator.max_flagged}")
+    # After validation, handle max-flagged and rate exit codes.
+    # Thresholds are frame-based: one frame may carry multiple flag labels.
+    flagged_frames = sum(1 for result in validator.results if result.flags)
+    total_flag_events = sum(summary['flag_counts'].values())
+    flagged_rate = (
+        flagged_frames / summary['frames_processed']
+        if summary['frames_processed'] > 0
+        else 0
+    )
+    if validator.max_flagged > 0 and flagged_frames > validator.max_flagged:
+        print(
+            f"\nERROR: Flagged frames {flagged_frames} exceed max-flagged {validator.max_flagged}"
+        )
         sys.exit(2)
     if validator.max_flagged_rate > 0 and flagged_rate > validator.max_flagged_rate:
-        print(f"\nERROR: Flagged frame rate {flagged_rate:.2%} exceeds max-flagged-rate {validator.max_flagged_rate:.2%}")
+        print(
+            f"\nERROR: Flagged frame rate {flagged_rate:.2%} exceeds max-flagged-rate {validator.max_flagged_rate:.2%}"
+        )
         sys.exit(2)
-    if total_flags > 0:
-        print(f"\nWARNING: {total_flags} issues detected. Check report for details.")
+    if flagged_frames > 0:
+        print(
+            f"\nWARNING: {flagged_frames} frame(s) flagged ({total_flag_events} total issue labels). Check report for details."
+        )
         sys.exit(1)
     else:
         print("\nSUCCESS: No issues detected!")

@@ -3,6 +3,7 @@
 ## Overview
 
 The `validate_upscale.py` script performs comprehensive validation of upscaled videos to detect:
+
 - Frame mapping errors (off‑by‑one issues)
 - Tile mosaic/quadrant artifacts
 - Cropping/offset drift
@@ -29,7 +30,6 @@ python validate_upscale.py \
 ```
 
 ### Options
-
 - `--sample N` (default: 1) – Process every Nth frame.
 - `--ssim-crop P` (default: 0.02) – Crop `P` fraction of border before SSIM/PSNR.
 - `--ssim-yonly true|false` (default: true) – Compute SSIM on the Y (luma) channel only.
@@ -40,6 +40,7 @@ python validate_upscale.py \
 - `--allow-trim` – Allow processing when input and output frame counts differ (trims to shorter).
 - `--match-time` – Match frames by timestamp instead of index (not yet implemented).
 - `--resample` – Resample output to match input frame rate (not yet implemented).
+
 - Threshold options (see below) can also be overridden.
 
 ### Advanced Usage with Custom Thresholds

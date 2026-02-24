@@ -1653,7 +1653,6 @@ def mux_audio_to_video(
             "copy",
             "-c:a",
             "copy",
-            "-shortest",
             str(output_video),
             "-y",
             "-hide_banner",
@@ -1681,7 +1680,6 @@ def mux_audio_to_video(
             "aac",
             "-b:a",
             audio_bitrate,
-            "-shortest",
             str(output_video),
             "-y",
             "-hide_banner",
@@ -1973,7 +1971,7 @@ def reassemble_video(
     cmd.extend(["-pix_fmt", "yuv420p"])
 
     if audio_path and audio_path.exists():
-        cmd.extend(["-c:a", "copy", "-shortest"])
+        cmd.extend(["-c:a", "copy"])
 
     cmd.extend(
         [
@@ -2998,10 +2996,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = parse_args(raw_argv)
 
-    resolve_model(args)
-
     cli_overrides = parse_cli_overrides(raw_argv)
     apply_quality_profile(args, cli_overrides)
+    resolve_model(args)
     try:
         if args.plan_only:
             return run_plan_only(args)

@@ -72,10 +72,6 @@ def apply_quality_profile(args: argparse.Namespace, cli_overrides: set[str]) -> 
         "audio_bitrate": "256k",
     }
 
-    if "model" not in cli_overrides and "type_alias" not in cli_overrides:
-        # Default model logic when no explicit profile is requested
-        profile_defaults["model"] = "realesrgan-x4plus"
-
     for key, value in profile_defaults.items():
         if key not in cli_overrides:
             setattr(args, key, value)

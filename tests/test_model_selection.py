@@ -29,6 +29,28 @@ def test_explicit_override_precedence():
     assert args.temporal_filter == "none", "Explicit --temporal-filter should win over profile"
     assert args.model == "my-custom-model", "Explicit -m should win over profile defaults"
 
+
+@mock.patch("upscale_video.resolve_toolchain")
+@mock.patch("pathlib.Path.exists")
+def test_profile_defaults_keep_scale_aware_model_resolution(
+    mock_exists, mock_resolve_toolchain
+):
+    mock_resolve_toolchain.return_value = Toolchain(
+        ffmpeg="/bin/ffmpeg",
+        ffprobe="/bin/ffprobe",
+        realesrgan_binary=pathlib.Path("/bin/realesrgan"),
+        model_path=pathlib.Path("/tmp/models")
+    )
+    mock_exists.return_value = True
+
+    argv = ["dummy.mp4", "--scale", "2"]
+    args = parse_args(argv)
+    overrides = parse_cli_overrides(argv)
+    apply_quality_profile(args, overrides)
+    resolve_model(args)
+
+    assert args.model == "realesrgan-x2plus"
+
 @mock.patch("upscale_video.resolve_toolchain")
 @mock.patch("pathlib.Path.exists")
 def test_scale_aware_selection_anime_2x(mock_exists, mock_resolve_toolchain):

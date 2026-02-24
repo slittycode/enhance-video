@@ -574,10 +574,45 @@ class TestSceneChunkHelpers(unittest.TestCase):
         self.assertIn("-c:a", first_cmd)
         copy_idx = first_cmd.index("-c:a")
         self.assertEqual(first_cmd[copy_idx + 1], "copy")
+        self.assertNotIn("-shortest", first_cmd)
         # Second call: AAC fallback
         second_cmd = run_subprocess_mock.call_args_list[1].args[0]
         aac_idx = second_cmd.index("-c:a")
         self.assertEqual(second_cmd[aac_idx + 1], "aac")
+        self.assertNotIn("-shortest", second_cmd)
+
+    def test_reassemble_video_does_not_shorten_to_audio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            frames_dir = root / "frames"
+            output_path = root / "output.mp4"
+            audio_path = root / "audio.m4a"
+            frames_dir.mkdir()
+            audio_path.write_bytes(b"audio")
+
+            with mock.patch(
+                "upscale_video.run_subprocess",
+                return_value=subprocess.CompletedProcess(
+                    args=["ffmpeg"], returncode=0, stdout="", stderr=""
+                ),
+            ) as run_subprocess_mock:
+                upscale_video.reassemble_video(
+                    "ffmpeg",
+                    frames_dir,
+                    output_path,
+                    framerate=30.0,
+                    audio_path=audio_path,
+                    crf=18,
+                    preset="slow",
+                    audio_bitrate="192k",
+                    codec="h264",
+                )
+
+        cmd = run_subprocess_mock.call_args.args[0]
+        self.assertIn("-c:a", cmd)
+        copy_idx = cmd.index("-c:a")
+        self.assertEqual(cmd[copy_idx + 1], "copy")
+        self.assertNotIn("-shortest", cmd)
 
 
 if __name__ == "__main__":
