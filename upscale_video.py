@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import json
 import hashlib
 import io
@@ -23,6 +24,31 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
+
+# ── Extracted modules (backward-compatible re-exports) ────────────────────────
+from toolchain import (  # noqa: F401
+    Toolchain,
+    get_default_calibration_path,
+    get_machine_id,
+    get_realesrgan_binary_name,
+    find_bundled_realesrgan_binary,
+    progress_write,
+    resolve_model_path,
+    resolve_realesrgan_binary,
+    resolve_toolchain,
+    run_subprocess,
+)
+from cli import (  # noqa: F401
+    QUALITY_PROFILES,
+    SUPPORTED_PRESETS,
+    SUPPORTED_SCALES,
+    TEMPORAL_FILTER_LEVELS,
+    apply_quality_profile,
+    parse_args,
+    parse_cli_overrides,
+    resolve_output_path,
+    validate_runtime_args,
+)
 
 # tracing dependencies added for lightweight performance profiling
 try:
@@ -54,6 +80,7 @@ def init_tracing() -> None:
 
 def _traced(func):
     """Decorator that wraps a function call in a tracing span if tracing is enabled."""
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         if tracer is None:
             init_tracing()
@@ -77,28 +104,15 @@ except ImportError:
 DEFAULT_FPS = 30.0
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
-SUPPORTED_SCALES = (2, 3, 4)
-TEMPORAL_FILTER_LEVELS = ("none", "light", "medium", "strong")
-QUALITY_PROFILES = ("custom", "max_quality")
-SUPPORTED_PRESETS = (
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-    "veryslow",
-)
+
+INPUT_FRAME_PATTERN = "frame_%08d.jpg"
+INPUT_FRAME_GLOB = "frame_*.jpg"
+OUTPUT_FRAME_PATTERN = "frame_%08d.png"
+OUTPUT_FRAME_GLOB = "frame_*.png"
 
 
-@dataclass(frozen=True)
-class Toolchain:
-    ffmpeg: str
-    ffprobe: str
-    realesrgan_binary: Path
-    model_path: Optional[Path]
+
+
 
 
 @dataclass(frozen=True)
@@ -149,92 +163,7 @@ class SceneAdaptiveResult:
     chunk_count: int
 
 
-def progress_write(message: str) -> None:
-    write_func = getattr(_tqdm, "write", None)
-    if callable(write_func):
-        write_func(message)
-    else:
-        print(message)
 
-
-def parse_cli_overrides(argv: Sequence[str]) -> set[str]:
-    """Return canonical option names explicitly provided by the caller."""
-    option_to_key = {
-        "--profile": "profile",
-        "--type": "type_alias",
-        "-m": "model",
-        "--tta": "tta",
-        "--temporal-filter": "temporal_filter",
-        "--preset": "preset",
-        "--crf": "crf",
-        "--upscale-mode": "upscale_mode",
-        "--audio-bitrate": "audio_bitrate",
-        "--runtime-guardrail-hours": "runtime_guardrail_hours",
-        "--runtime-sample-frames": "runtime_sample_frames",
-        "--disable-runtime-guardrail": "disable_runtime_guardrail",
-    }
-
-    overrides: set[str] = set()
-    for token in argv:
-        if not token.startswith("-"):
-            continue
-        option = token.split("=", maxsplit=1)[0]
-        key = option_to_key.get(option)
-        if key:
-            overrides.add(key)
-    return overrides
-
-
-def apply_quality_profile(args: argparse.Namespace, cli_overrides: set[str]) -> None:
-    """Apply quality profile defaults unless overridden by explicit flags."""
-    if args.profile != "max_quality":
-        return
-
-    profile_defaults: dict[str, object] = {
-        "tta": True,
-        "temporal_filter": "strong",
-        "preset": "veryslow",
-        "crf": 14,
-        "upscale_mode": "auto",
-        "audio_bitrate": "256k",
-    }
-
-    if "model" not in cli_overrides and "type_alias" not in cli_overrides:
-        # Default model logic when no explicit profile is requested
-        profile_defaults["model"] = "realesrgan-x4plus"
-
-    for key, value in profile_defaults.items():
-        if key not in cli_overrides:
-            setattr(args, key, value)
-
-    if "runtime_guardrail_hours" not in cli_overrides and args.runtime_guardrail_hours <= 0:
-        args.runtime_guardrail_hours = 72.0
-
-
-def get_default_calibration_path() -> Path:
-    base = Path.home() / ".cache" / "enhance-ai"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "runtime_calibration.json"
-
-
-def get_machine_id() -> str:
-    raw = "|".join(
-        [
-            platform.system(),
-            platform.machine(),
-            platform.processor() or "unknown",
-            platform.version(),
-        ]
-    )
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    return f"{platform.system().lower()}-{platform.machine().lower()}-{digest}"
-
-
-def get_realesrgan_binary_name() -> str:
-    """Return the expected Real-ESRGAN binary name for the current OS."""
-    if platform.system().lower() == "windows":
-        return "realesrgan-ncnn-vulkan.exe"
-    return "realesrgan-ncnn-vulkan"
 
 
 def parse_framerate(value: str) -> float:
@@ -259,118 +188,8 @@ def parse_framerate(value: str) -> float:
     return framerate
 
 
-def find_bundled_realesrgan_binary(search_root: Path, binary_name: str) -> Optional[Path]:
-    """Search the repository tree for a vendored Real-ESRGAN binary.
-
-    Backward-compatible: after repository rename the vendored binary may live
-    under `enhance-ai/` instead of `Real-ESRGAN-ncnn-vulkan/` — check both.
-    """
-    vendor_candidates = [
-        search_root / "Real-ESRGAN-ncnn-vulkan",
-        search_root / "enhance-ai",
-    ]
-
-    for vendor_root in vendor_candidates:
-        if not vendor_root.exists():
-            continue
-
-        candidates = sorted(vendor_root.rglob(binary_name))
-        for candidate in candidates:
-            if not candidate.is_file():
-                continue
-            if platform.system().lower() == "windows":
-                return candidate
-            if os.access(candidate, os.X_OK):
-                return candidate
-
-    return None
 
 
-def resolve_realesrgan_binary(
-    custom_path: Optional[str],
-    search_root: Optional[Path] = None,
-) -> Path:
-    """Resolve Real-ESRGAN binary from custom path, PATH, or vendored location."""
-    if search_root is None:
-        search_root = Path.cwd()
-
-    if custom_path:
-        candidate = Path(custom_path).expanduser().resolve()
-        if not candidate.is_file():
-            raise FileNotFoundError(f"Real-ESRGAN binary not found at: {candidate}")
-        return candidate
-
-    binary_name = get_realesrgan_binary_name()
-
-    system_binary = shutil.which(binary_name)
-    if system_binary:
-        return Path(system_binary).resolve()
-
-    bundled_binary = find_bundled_realesrgan_binary(search_root, binary_name)
-    if bundled_binary:
-        return bundled_binary.resolve()
-
-    raise FileNotFoundError(
-        "Unable to locate Real-ESRGAN binary. Install it in PATH or pass "
-        "--realesrgan-path explicitly."
-    )
-
-
-def resolve_model_path(
-    custom_model_path: Optional[str],
-    realesrgan_binary: Path,
-) -> Optional[Path]:
-    """Resolve model directory from explicit value or binary-adjacent models folder."""
-    if custom_model_path:
-        model_dir = Path(custom_model_path).expanduser().resolve()
-        if not model_dir.is_dir():
-            raise FileNotFoundError(f"Model directory not found: {model_dir}")
-        return model_dir
-
-    sibling_models = realesrgan_binary.parent / "models"
-    if sibling_models.is_dir():
-        return sibling_models.resolve()
-    return None
-
-
-def resolve_toolchain(args: argparse.Namespace) -> Toolchain:
-    """Resolve runtime binaries and raise clear dependency errors."""
-    ffmpeg_bin = shutil.which("ffmpeg")
-    ffprobe_bin = shutil.which("ffprobe")
-    if not ffmpeg_bin or not ffprobe_bin:
-        missing = []
-        if not ffmpeg_bin:
-            missing.append("ffmpeg")
-        if not ffprobe_bin:
-            missing.append("ffprobe")
-        raise FileNotFoundError(
-            f"Missing required dependency: {', '.join(missing)}. "
-            "Install with Homebrew (macOS) or your system package manager."
-        )
-
-    realesrgan_binary = resolve_realesrgan_binary(args.realesrgan_path, Path.cwd())
-    model_path = resolve_model_path(args.model_path, realesrgan_binary)
-
-    return Toolchain(
-        ffmpeg=ffmpeg_bin,
-        ffprobe=ffprobe_bin,
-        realesrgan_binary=realesrgan_binary,
-        model_path=model_path,
-    )
-
-
-def run_subprocess(
-    cmd: Sequence[str],
-    *,
-    check: bool = True,
-    capture_output: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(part) for part in cmd],
-        check=check,
-        capture_output=capture_output,
-        text=True,
-    )
 
 
 def get_video_info(ffprobe_bin: str, input_video: Path) -> VideoInfo:
@@ -433,7 +252,7 @@ def get_video_info(ffprobe_bin: str, input_video: Path) -> VideoInfo:
 
 def extract_frames(ffmpeg_bin: str, input_video: Path, frames_dir: Path) -> int:
     """Extract input video frames into PNG files."""
-    output_pattern = frames_dir / "frame_%08d.png"
+    output_pattern = frames_dir / INPUT_FRAME_PATTERN
     cmd = [
         ffmpeg_bin,
         "-i",
@@ -442,6 +261,8 @@ def extract_frames(ffmpeg_bin: str, input_video: Path, frames_dir: Path) -> int:
         "passthrough",
         "-start_number",
         "1",
+        "-q:v",
+        "2",
         str(output_pattern),
         "-y",
         "-hide_banner",
@@ -450,7 +271,7 @@ def extract_frames(ffmpeg_bin: str, input_video: Path, frames_dir: Path) -> int:
     ]
     run_subprocess(cmd)
 
-    frame_count = len(list(frames_dir.glob("frame_*.png")))
+    frame_count = len(list(frames_dir.glob(INPUT_FRAME_GLOB)))
     if frame_count == 0:
         raise RuntimeError("Frame extraction produced zero output frames.")
     return frame_count
@@ -521,7 +342,7 @@ def choose_upscale_mode(requested_mode: str, output_dir: Path, force: bool) -> s
         return requested_mode
     if force:
         return "batch"
-    has_existing = any(output_dir.glob("frame_*.png"))
+    has_existing = any(output_dir.glob(OUTPUT_FRAME_GLOB))
     return "frame" if has_existing else "batch"
 
 
@@ -552,7 +373,7 @@ def ensure_input_frames(
     force: bool,
 ) -> int:
     """Reuse cached frames when possible, otherwise extract frames."""
-    existing_frames = sorted(input_frames_dir.glob("frame_*.png"))
+    existing_frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
     if existing_frames and not force:
         print(f"Reusing {len(existing_frames)} existing extracted frame(s).")
         return len(existing_frames)
@@ -1060,7 +881,7 @@ def estimate_candidate_runtime(
     candidate: GuardrailCandidate,
     workspace_root: Path,
 ) -> RuntimeEstimate:
-    frames = sorted(input_frames_dir.glob("frame_*.png"))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
     return estimate_candidate_runtime_for_frames(
         toolchain,
         frames=frames,
@@ -1226,27 +1047,50 @@ def run_upscale_batch(
     jobs: Optional[str],
     dry_run: bool,
 ) -> None:
-    cmd = build_realesrgan_command(
-        toolchain.realesrgan_binary,
-        input_frames_dir,
-        output_frames_dir,
-        scale_factor=scale_factor,
-        model_name=model_name,
-        gpu_id=gpu_id,
-        tile_size=tile_size,
-        tta=tta,
-        model_path=toolchain.model_path,
-        jobs=jobs,
-    )
+    # Build tile-size fallback ladder: requested → 512 → 256 → 128
+    tile_attempts = [tile_size]
+    if tile_size == 0:
+        tile_attempts.extend([512, 256, 128])
+    elif tile_size > 128:
+        for fallback in (tile_size // 2, 128):
+            if fallback not in tile_attempts and fallback >= 128:
+                tile_attempts.append(fallback)
 
-    if dry_run:
-        print(f"[DRY RUN] {' '.join(cmd)}")
-        return
+    for attempt_idx, attempt_tile in enumerate(tile_attempts):
+        cmd = build_realesrgan_command(
+            toolchain.realesrgan_binary,
+            input_frames_dir,
+            output_frames_dir,
+            scale_factor=scale_factor,
+            model_name=model_name,
+            gpu_id=gpu_id,
+            tile_size=attempt_tile,
+            tta=tta,
+            model_path=toolchain.model_path,
+            jobs=jobs,
+        )
 
-    result = run_subprocess(cmd, check=False, capture_output=True)
-    if result.returncode != 0:
+        if dry_run:
+            print(f"[DRY RUN] {' '.join(cmd)}")
+            return
+
+        result = run_subprocess(cmd, check=False, capture_output=True)
+        if result.returncode == 0:
+            if attempt_idx > 0:
+                print(f"  Batch upscale succeeded with tile_size={attempt_tile}")
+            return
+
         stderr = result.stderr.strip() if result.stderr else "no stderr"
-        raise RuntimeError(f"Batch upscale failed: {stderr}")
+        is_last = attempt_idx == len(tile_attempts) - 1
+        if is_last:
+            raise RuntimeError(f"Batch upscale failed: {stderr}")
+
+        next_tile = tile_attempts[attempt_idx + 1]
+        progress_write(
+            f"Warning: Batch upscale failed (tile={attempt_tile}), "
+            f"retrying with tile_size={next_tile}..."
+        )
+        time.sleep(2)
 
 
 def run_upscale_frame_mode(
@@ -1265,7 +1109,7 @@ def run_upscale_frame_mode(
     target_width: int,
     target_height: int,
 ) -> None:
-    frames = sorted(input_frames_dir.glob("frame_*.png"))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
     if not frames:
         raise RuntimeError("No input frames found for upscaling.")
 
@@ -1295,12 +1139,26 @@ def run_upscale_frame_mode(
             progress_write(f"[DRY RUN] {' '.join(cmd)}")
             continue
 
-        result = run_subprocess(cmd, check=False, capture_output=True)
-        if result.returncode == 0 and output_frame.exists() and output_frame.stat().st_size > 0:
+        succeeded = False
+        result = None
+        for attempt in range(2):
+            try:
+                result = run_subprocess(cmd, check=False, capture_output=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                progress_write(f"Warning: Upscale timed out for {frame.name} (attempt {attempt + 1})")
+                if attempt == 0:
+                    time.sleep(2)
+                continue
+            if result.returncode == 0 and output_frame.exists() and output_frame.stat().st_size > 0:
+                succeeded = True
+                break
+            if attempt == 0:
+                time.sleep(2)
+        if succeeded:
             continue
 
         failed_frames += 1
-        stderr = result.stderr.strip() if result.stderr else f"exit={result.returncode}"
+        stderr = result.stderr.strip() if hasattr(result, "stderr") and result.stderr else "timed out or unknown error"
         progress_write(f"Warning: AI upscale failed for {frame.name}: {stderr}")
         fallback_resize_frame(
             toolchain.ffmpeg,
@@ -1476,12 +1334,13 @@ def render_scene_chunk(
     framerate: float,
     preset: str,
     crf: int,
+    codec: str = "h264",
 ) -> None:
     """Render a scene chunk from upscaled frames."""
     if frame_count <= 0:
         raise ValueError("Scene chunk frame count must be > 0.")
 
-    input_pattern = output_frames_dir / "frame_%08d.png"
+    input_pattern = output_frames_dir / OUTPUT_FRAME_PATTERN
     cmd = [
         ffmpeg_bin,
         "-framerate",
@@ -1492,12 +1351,9 @@ def render_scene_chunk(
         str(input_pattern),
         "-frames:v",
         str(frame_count),
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        str(crf),
+    ]
+    cmd.extend(get_codec_flags(codec, preset, crf))
+    cmd.extend([
         "-pix_fmt",
         "yuv420p",
         str(chunk_path),
@@ -1505,7 +1361,7 @@ def render_scene_chunk(
         "-hide_banner",
         "-loglevel",
         "warning",
-    ]
+    ])
     run_subprocess(cmd)
 
 
@@ -1516,6 +1372,7 @@ def concat_scene_chunks(
     *,
     preset: str,
     crf: int,
+    codec: str = "h264",
 ) -> Path:
     """Concatenate scene chunk videos into a single video-only file."""
     if not chunk_paths:
@@ -1557,12 +1414,9 @@ def concat_scene_chunks(
         "0",
         "-i",
         str(concat_list),
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        str(crf),
+    ]
+    reencode_cmd.extend(get_codec_flags(codec, preset, crf))
+    reencode_cmd.extend([
         "-pix_fmt",
         "yuv420p",
         str(output_video),
@@ -1570,7 +1424,7 @@ def concat_scene_chunks(
         "-hide_banner",
         "-loglevel",
         "warning",
-    ]
+    ])
     run_subprocess(reencode_cmd)
     return concat_list
 
@@ -1585,30 +1439,38 @@ def mux_audio_to_video(
 ) -> None:
     """Mux optional audio track into a pre-rendered video stream."""
     if audio_path and audio_path.exists():
-        cmd = [
+        # Try stream-copy first (lossless, fast).
+        copy_cmd = [
             ffmpeg_bin,
-            "-i",
-            str(video_path),
-            "-i",
-            str(audio_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            audio_bitrate,
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "copy",
             "-shortest",
             str(output_video),
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
+            "-y", "-hide_banner", "-loglevel", "warning",
         ]
-        run_subprocess(cmd)
+        copy_result = run_subprocess(copy_cmd, check=False, capture_output=True)
+        if copy_result.returncode == 0 and output_video.exists():
+            return
+
+        # Fallback: transcode audio to AAC for container compatibility.
+        transcode_cmd = [
+            ffmpeg_bin,
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-shortest",
+            str(output_video),
+            "-y", "-hide_banner", "-loglevel", "warning",
+        ]
+        run_subprocess(transcode_cmd)
         return
 
     if video_path != output_video:
@@ -1640,9 +1502,10 @@ def run_upscale_scene_adaptive(
     preset: str,
     crf: int,
     keep_scene_chunks: bool,
+    codec: str = "h264",
 ) -> SceneAdaptiveResult:
     """Upscale frames scene-by-scene, render chunk videos, and concatenate."""
-    frames = sorted(input_frames_dir.glob("frame_*.png"))
+    frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
     if not frames:
         raise RuntimeError("No input frames found for scene-adaptive upscaling.")
     if not scene_plan:
@@ -1759,6 +1622,7 @@ def run_upscale_scene_adaptive(
                 framerate=framerate,
                 preset=preset,
                 crf=crf,
+                codec=codec,
             )
             chunk_paths.append(chunk_path)
 
@@ -1784,6 +1648,7 @@ def run_upscale_scene_adaptive(
         concatenated_video,
         preset=preset,
         crf=crf,
+        codec=codec,
     )
 
     if not keep_scene_chunks:
@@ -1813,8 +1678,9 @@ def reassemble_video(
     crf: int,
     preset: str,
     audio_bitrate: str,
+    codec: str = "h264",
 ) -> None:
-    input_pattern = frames_dir / "frame_%08d.png"
+    input_pattern = frames_dir / OUTPUT_FRAME_PATTERN
     cmd = [
         ffmpeg_bin,
         "-framerate",
@@ -1830,21 +1696,11 @@ def reassemble_video(
     if audio_path and audio_path.exists():
         cmd.extend(["-map", "1:a:0"])
 
-    cmd.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-crf",
-            str(crf),
-            "-pix_fmt",
-            "yuv420p",
-        ]
-    )
+    cmd.extend(get_codec_flags(codec, preset, crf))
+    cmd.extend(["-pix_fmt", "yuv420p"])
 
     if audio_path and audio_path.exists():
-        cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate, "-shortest"])
+        cmd.extend(["-c:a", "copy", "-shortest"])
 
     cmd.extend(
         [
@@ -1880,6 +1736,7 @@ def apply_temporal_filter(
     level: str,
     preset: str,
     crf: int,
+    codec: str = "h264",
 ) -> None:
     """Apply optional temporal denoise/sharpen pass to reduce flicker."""
     filter_expression = get_temporal_filter_expression(level)
@@ -1898,12 +1755,9 @@ def apply_temporal_filter(
         "0:v:0",
         "-map",
         "0:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        str(crf),
+    ]
+    cmd.extend(get_codec_flags(codec, preset, crf))
+    cmd.extend([
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -1913,7 +1767,7 @@ def apply_temporal_filter(
         "-hide_banner",
         "-loglevel",
         "warning",
-    ]
+    ])
     run_subprocess(cmd)
 
 
@@ -1928,224 +1782,50 @@ def format_time(seconds: float) -> str:
     return f"{secs:.1f}s"
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Upscale video using Real-ESRGAN (vendored in this repository)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    parser.add_argument("input_video", type=str, help="Path to input video")
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=str,
-        default=None,
-        help="Output video path (default: <input>_upscaled_<scale>x.mp4)",
-    )
-    parser.add_argument(
-        "-s",
-        "--scale",
-        type=int,
-        default=4,
-        choices=SUPPORTED_SCALES,
-        help="Upscaling factor",
-    )
-    parser.add_argument(
-        "--type",
-        dest="type_alias",
-        type=str,
-        default="real-life",
-        choices=("real-life", "animation"),
-        help="Video content type (determines underlying AI model)",
-    )
-    parser.add_argument(
-        "-m",
-        "--model",
-        type=str,
-        default=None,
-        help=argparse.SUPPRESS,  # Hidden advanced override
-    )
-    parser.add_argument(
-        "--profile",
-        type=str,
-        choices=QUALITY_PROFILES,
-        default="max_quality",
-        help="Quality profile defaults",
-    )
-    parser.add_argument("-g", "--gpu", type=int, default=0, help="GPU device ID")
-    parser.add_argument(
-        "--realesrgan-path",
-        type=str,
-        default=None,
-        help="Custom path to realesrgan-ncnn-vulkan binary",
-    )
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default=None,
-        help="Custom model directory path",
-    )
-    parser.add_argument(
-        "-t",
-        "--tile-size",
-        type=int,
-        default=0,
-        help="Tile size (0 = auto)",
-    )
-    parser.add_argument("--tta", action="store_true", help="Enable test-time augmentation")
-    parser.add_argument("--force", action="store_true", help="Re-upscale all frames")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
-    parser.add_argument(
-        "--plan-only",
-        action="store_true",
-        help="Analyze pipeline strategy and print clean JSON plan only",
-    )
-    parser.add_argument(
-        "--work-dir",
-        type=str,
-        default=None,
-        help="Reusable workspace directory for resume/retry workflows",
-    )
-    parser.add_argument(
-        "--cleanup-work-dir",
-        action="store_true",
-        help="Remove --work-dir contents after run completes",
-    )
-    parser.add_argument(
-        "--scene-adaptive",
-        action="store_true",
-        help="Enable scene-aware per-scene candidate selection",
-    )
-    parser.add_argument(
-        "--scene-threshold",
-        type=float,
-        default=0.35,
-        help="Scene detection threshold (0-1)",
-    )
-    parser.add_argument(
-        "--scene-min-frames",
-        type=int,
-        default=24,
-        help="Minimum frames per scene after merge",
-    )
-    parser.add_argument(
-        "--scene-sample-frames",
-        type=int,
-        default=4,
-        help="Per-scene sample frames for adaptive candidate estimation",
-    )
-    parser.add_argument(
-        "--scene-budget-slack",
-        type=float,
-        default=1.10,
-        help="Scene budget multiplier (higher means less aggressive fallback)",
-    )
-    parser.add_argument(
-        "--texture-priority",
-        type=float,
-        default=0.85,
-        help="Texture weighting strength for scene budget allocation (0 disables)",
-    )
-    parser.add_argument(
-        "--keep-scene-chunks",
-        action="store_true",
-        help="Keep intermediate scene chunk artifacts after concatenation",
-    )
-    parser.add_argument(
-        "--upscale-mode",
-        type=str,
-        choices=("auto", "batch", "frame"),
-        default="auto",
-        help="Upscale mode: batch is fastest, frame supports resume",
-    )
-    parser.add_argument(
-        "--jobs",
-        type=str,
-        default=None,
-        help="Real-ESRGAN thread tuple (load:proc:save), for example 2:2:2",
-    )
-    parser.add_argument("--crf", type=int, default=18, help="x264 CRF (0-51)")
-    parser.add_argument(
-        "--preset",
-        type=str,
-        default="slow",
-        choices=SUPPORTED_PRESETS,
-        help="x264 preset",
-    )
-    parser.add_argument(
-        "--audio-bitrate",
-        type=str,
-        default="192k",
-        help="Audio bitrate for final AAC encode",
-    )
-    parser.add_argument(
-        "--runtime-guardrail-hours",
-        type=float,
-        default=72.0,
-        help="Maximum projected runtime before quality ladder fallback",
-    )
-    parser.add_argument(
-        "--runtime-sample-frames",
-        type=int,
-        default=12,
-        help="Number of frames to sample for runtime estimation",
-    )
-    parser.add_argument(
-        "--disable-runtime-guardrail",
-        action="store_true",
-        help="Disable runtime estimation and fallback ladder",
-    )
-    parser.add_argument(
-        "--calibration-file",
-        type=str,
-        default=str(get_default_calibration_path()),
-        help="Path to machine runtime calibration JSON",
-    )
-    parser.add_argument(
-        "--reset-calibration",
-        action="store_true",
-        help="Ignore existing calibration data for this run",
-    )
-    parser.add_argument(
-        "--temporal-filter",
-        type=str,
-        choices=TEMPORAL_FILTER_LEVELS,
-        default="none",
-        help="Optional temporal anti-flicker post-process pass",
-    )
-    parser.add_argument("--keep-temp", action="store_true", help="Keep temporary workspace")
-
-    return parser.parse_args(argv)
 
 
-def resolve_output_path(input_video: Path, output_arg: Optional[str], scale: int) -> Path:
-    if output_arg:
-        return Path(output_arg).expanduser().resolve()
-    return (input_video.parent / f"{input_video.stem}_upscaled_{scale}x.mp4").resolve()
 
 
-def validate_runtime_args(args: argparse.Namespace) -> None:
-    if args.crf < 0 or args.crf > 51:
-        raise ValueError("CRF must be between 0 and 51.")
-    if args.tile_size < 0:
-        raise ValueError("Tile size must be >= 0.")
-    if args.runtime_guardrail_hours <= 0:
-        raise ValueError("Runtime guardrail hours must be > 0.")
-    if args.runtime_sample_frames <= 0:
-        raise ValueError("Runtime sample frames must be > 0.")
-    if not (0.0 < args.scene_threshold < 1.0):
-        raise ValueError("Scene threshold must be between 0 and 1.")
-    if args.scene_min_frames <= 0:
-        raise ValueError("Scene min frames must be > 0.")
-    if args.scene_sample_frames <= 0:
-        raise ValueError("Scene sample frames must be > 0.")
-    if args.scene_budget_slack <= 0:
-        raise ValueError("Scene budget slack must be > 0.")
-    if args.texture_priority < 0:
-        raise ValueError("Texture priority must be >= 0.")
-    calibration_target = Path(args.calibration_file).expanduser()
-    if calibration_target.exists() and calibration_target.is_dir():
-        raise ValueError("Calibration file path must be a file, not a directory.")
+def check_disk_space(
+    workspace_root: Path,
+    info: VideoInfo,
+    scale: int,
+    frame_count: int,
+) -> None:
+    """Warn or fail if projected disk usage exceeds available space."""
+    # JPEG input: ~0.15 bytes per pixel; PNG output: ~3 bytes per pixel
+    input_bytes_per_frame = info.width * info.height * 0.15
+    output_bytes_per_frame = (info.width * scale) * (info.height * scale) * 3.0
+    projected_bytes = (input_bytes_per_frame + output_bytes_per_frame) * frame_count
+
+    available = shutil.disk_usage(workspace_root).free
+    if projected_bytes > available * 0.9:
+        projected_gb = projected_bytes / (1024**3)
+        available_gb = available / (1024**3)
+        raise RuntimeError(
+            f"Projected disk usage ({projected_gb:.1f} GB) exceeds 90% of "
+            f"available space ({available_gb:.1f} GB). Use --work-dir to "
+            f"point to a larger volume, or reduce --scale."
+        )
+    elif projected_bytes > available * 0.5:
+        projected_gb = projected_bytes / (1024**3)
+        available_gb = available / (1024**3)
+        progress_write(
+            f"Warning: Projected disk usage ({projected_gb:.1f} GB) is over "
+            f"50% of available space ({available_gb:.1f} GB)."
+        )
+
+
+def get_codec_flags(codec: str, preset: str, crf: int) -> list[str]:
+    """Return ffmpeg codec flags for the requested encoder."""
+    if codec == "h264":
+        return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf)]
+    if codec == "h265":
+        return ["-c:v", "libx265", "-preset", preset, "-crf", str(crf)]
+    if codec == "h265-hw":
+        # Apple VideoToolbox hardware encoder; -q:v maps roughly to CRF
+        return ["-c:v", "hevc_videotoolbox", "-q:v", str(max(1, crf))]
+    raise ValueError(f"Unsupported codec: {codec}")
 
 
 def serialize_scene_plan(scene_plan: list[ScenePlanEntry]) -> list[dict[str, object]]:
@@ -2263,7 +1943,7 @@ def run_plan_only(args: argparse.Namespace) -> int:
             if not scene_ranges:
                 scene_ranges = [(1, frame_count)]
 
-            frames = sorted(input_frames_dir.glob("frame_*.png"))
+            frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
             candidates = build_scene_adaptive_candidates(args)
             scene_plan = plan_scene_adaptive_strategy(
                 toolchain,
@@ -2483,8 +2163,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
         print(f"  Frames: {frame_count}")
         print(f"  Time: {format_time(time.time() - step_start)}\n")
 
-        existing_upscaled_count = len(list(output_frames_dir.glob("frame_*.png")))
+        existing_upscaled_count = len(list(output_frames_dir.glob(OUTPUT_FRAME_GLOB)))
         needs_upscale_work = args.force or existing_upscaled_count < frame_count
+        if needs_upscale_work:
+            check_disk_space(workspace_root, info, args.scale, frame_count)
         if args.scene_adaptive:
             print("Detecting scene boundaries...")
             scene_boundaries = detect_scene_boundaries(
@@ -2647,7 +2329,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 print(
                     f"  Scene-adaptive ladder: {', '.join(candidate.name for candidate in scene_candidates)}"
                 )
-            planning_frames = sorted(input_frames_dir.glob("frame_*.png"))
+            planning_frames = sorted(input_frames_dir.glob(INPUT_FRAME_GLOB))
             allow_scene_sampling = (
                 scene_guardrail_seconds is not None and not args.dry_run and needs_upscale_work
             )
@@ -2729,6 +2411,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 preset=args.preset,
                 crf=args.crf,
                 keep_scene_chunks=args.keep_scene_chunks,
+                codec=args.codec,
             )
             if scene_result.worst_candidate_index > 0:
                 print(
@@ -2820,6 +2503,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     level=args.temporal_filter,
                     preset=args.preset,
                     crf=args.crf,
+                    codec=args.codec,
                 )
                 video_for_mux = filtered_video
             mux_audio_to_video(
@@ -2842,6 +2526,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 crf=args.crf,
                 preset=args.preset,
                 audio_bitrate=args.audio_bitrate,
+                codec=args.codec,
             )
             if args.temporal_filter != "none":
                 print("Applying temporal filter...")
@@ -2852,6 +2537,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     level=args.temporal_filter,
                     preset=args.preset,
                     crf=args.crf,
+                    codec=args.codec,
                 )
         print(f"  Time: {format_time(time.time() - step_start)}\n")
 

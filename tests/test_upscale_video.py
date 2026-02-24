@@ -107,7 +107,7 @@ class TestFrameExtractionReuse(unittest.TestCase):
             input_dir = Path(temp_dir) / "input_frames"
             input_dir.mkdir()
             for idx in range(1, 4):
-                (input_dir / f"frame_{idx:08d}.png").touch()
+                (input_dir / f"frame_{idx:08d}.jpg").touch()
 
             with mock.patch("upscale_video.extract_frames") as extract_mock:
                 frame_count = upscale_video.ensure_input_frames(
@@ -124,7 +124,7 @@ class TestFrameExtractionReuse(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_dir = Path(temp_dir) / "input_frames"
             input_dir.mkdir()
-            (input_dir / "frame_00000001.png").touch()
+            (input_dir / "frame_00000001.jpg").touch()
 
             with mock.patch("upscale_video.extract_frames", return_value=5) as extract_mock:
                 frame_count = upscale_video.ensure_input_frames(
@@ -548,7 +548,18 @@ class TestSceneChunkHelpers(unittest.TestCase):
             video_path.write_bytes(b"video")
             audio_path.write_bytes(b"audio")
 
-            with mock.patch("upscale_video.run_subprocess") as run_subprocess_mock:
+            # Stream-copy attempt "fails", then AAC fallback succeeds.
+            copy_fail = subprocess.CompletedProcess(
+                args=["ffmpeg"], returncode=1, stdout="", stderr="copy failed",
+            )
+            aac_ok = subprocess.CompletedProcess(
+                args=["ffmpeg"], returncode=0, stdout="", stderr="",
+            )
+
+            with mock.patch(
+                "upscale_video.run_subprocess",
+                side_effect=[copy_fail, aac_ok],
+            ) as run_subprocess_mock:
                 upscale_video.mux_audio_to_video(
                     "ffmpeg",
                     video_path,
@@ -557,10 +568,16 @@ class TestSceneChunkHelpers(unittest.TestCase):
                     audio_bitrate="256k",
                 )
 
-        run_subprocess_mock.assert_called_once()
-        cmd = run_subprocess_mock.call_args.args[0]
-        self.assertIn("-c:v", cmd)
-        self.assertIn("copy", cmd)
+        self.assertEqual(run_subprocess_mock.call_count, 2)
+        # First call: stream-copy attempt
+        first_cmd = run_subprocess_mock.call_args_list[0].args[0]
+        self.assertIn("-c:a", first_cmd)
+        copy_idx = first_cmd.index("-c:a")
+        self.assertEqual(first_cmd[copy_idx + 1], "copy")
+        # Second call: AAC fallback
+        second_cmd = run_subprocess_mock.call_args_list[1].args[0]
+        aac_idx = second_cmd.index("-c:a")
+        self.assertEqual(second_cmd[aac_idx + 1], "aac")
 
 
 if __name__ == "__main__":
