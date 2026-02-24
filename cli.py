@@ -35,6 +35,7 @@ def parse_cli_overrides(argv: Sequence[str]) -> set[str]:
         "--profile": "profile",
         "--type": "type_alias",
         "-m": "model",
+        "--model": "model",
         "--tta": "tta",
         "--temporal-filter": "temporal_filter",
         "--preset": "preset",
@@ -140,7 +141,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         dest="type_alias",
         type=str,
         default="real-life",
-        choices=("real-life", "animation"),
+        choices=("real-life", "animation", "auto"),
         help="Video content type (determines underlying AI model)",
     )
     parser.add_argument(

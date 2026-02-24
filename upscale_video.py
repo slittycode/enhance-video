@@ -80,9 +80,13 @@ def init_tracing() -> None:
     provider = TracerProvider(resource=resource)
     try:
         if os.environ.get("ENABLE_OTLP_TRACING") == "1":
-            # We try to export to a local tempo/jaeger instance
-            exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
-            provider.add_span_processor(BatchSpanProcessor(exporter))
+            import socket
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex(("localhost", 4318)) == 0:
+                    exporter = OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces")
+                    provider.add_span_processor(BatchSpanProcessor(exporter))
     except Exception:
         pass  # silently fail if OTLP is not available
 
@@ -2209,13 +2213,14 @@ def run_plan_only(args: argparse.Namespace) -> int:
         }
 
         if args.scene_adaptive:
-            scene_boundaries = detect_scene_boundaries(
-                toolchain.ffmpeg,
-                input_video,
-                scene_threshold=args.scene_threshold,
-                framerate=info.framerate,
-                total_frames=frame_count,
-            )
+            with spinner("Detecting scene boundaries..."):
+                scene_boundaries = detect_scene_boundaries(
+                    toolchain.ffmpeg,
+                    input_video,
+                    scene_threshold=args.scene_threshold,
+                    framerate=info.framerate,
+                    total_frames=frame_count,
+                )
             scene_ranges = build_scene_ranges(
                 total_frames=frame_count,
                 boundaries=scene_boundaries,
@@ -2443,12 +2448,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
         print("Preparing frames...")
         step_start = time.time()
-        frame_count = ensure_input_frames(
-            toolchain.ffmpeg,
-            input_video,
-            input_frames_dir,
-            args.force,
-        )
+        with spinner("Extracting frames..."):
+            frame_count = ensure_input_frames(
+                toolchain.ffmpeg,
+                input_video,
+                input_frames_dir,
+                args.force,
+            )
         print(f"  Frames: {frame_count}")
         print(f"  Time: {format_time(time.time() - step_start)}\n")
 
@@ -2458,13 +2464,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
             check_disk_space(workspace_root, info, args.scale, frame_count)
         if args.scene_adaptive:
             print("Detecting scene boundaries...")
-            scene_boundaries = detect_scene_boundaries(
-                toolchain.ffmpeg,
-                input_video,
-                scene_threshold=args.scene_threshold,
-                framerate=info.framerate,
-                total_frames=frame_count,
-            )
+            with spinner("Detecting scene boundaries..."):
+                scene_boundaries = detect_scene_boundaries(
+                    toolchain.ffmpeg,
+                    input_video,
+                    scene_threshold=args.scene_threshold,
+                    framerate=info.framerate,
+                    total_frames=frame_count,
+                )
             scene_ranges = build_scene_ranges(
                 total_frames=frame_count,
                 boundaries=scene_boundaries,
@@ -2880,17 +2887,118 @@ def run_pipeline(args: argparse.Namespace) -> int:
             print(f"Workspace kept at: {workspace_root}")
 
 
+def analyze_video_type(input_path: Path, num_samples: int = 5) -> str:
+    """Analyze a few frames of the video to heuristically determine if it's animation or real-life."""
+    try:
+        import tempfile
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("  Warning: cv2 or numpy not installed. Cannot run auto-heuristic. Defaulting to real-life.")
+        return "real-life"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        out_pattern = os.path.join(temp_dir, "frame_%03d.png")
+        cmd = [
+            "ffmpeg", "-y", "-v", "error", "-i", str(input_path),
+            "-vf", "thumbnail,scale=-1:720",
+            "-vsync", "vfr", "-frames:v", str(num_samples),
+            out_pattern
+        ]
+        
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            print("  Warning: Failed to extract frames for heuristic analysis. Defaulting to real-life.")
+            return "real-life"
+
+        edge_densities = []
+        texture_variances = []
+        
+        for file in Path(temp_dir).glob("*.png"):
+            img = cv2.imread(str(file), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+                
+            # 1. Edge density using Canny
+            edges = cv2.Canny(img, 50, 150)
+            edge_density = np.count_nonzero(edges) / edges.size
+            edge_densities.append(float(edge_density))
+            
+            # 2. Texture variance using Laplacian
+            laplacian = cv2.Laplacian(img, cv2.CV_64F)
+            texture_variances.append(float(laplacian.var()))
+            
+        if not edge_densities:
+            print("  Warning: No frames were valid for analysis. Defaulting to real-life.")
+            return "real-life"
+            
+        avg_density = float(np.mean(edge_densities))
+        avg_texture = float(np.mean(texture_variances))
+        
+        # Anime typically has strong, distinct edges but lower overall texture variance.
+        # Real-life footage has lots of high-frequency noise/texture everywhere (>1500 var).
+        is_anime = False
+        if avg_texture < 1200.0 and avg_density > 0.01:
+            is_anime = True
+            
+        detected_type = "animation" if is_anime else "real-life"
+        print(f"Auto-detected type: {detected_type} (reason: edge_density={avg_density:.4f}, texture_variance={avg_texture:.2f})")
+        return detected_type
+
+
+def resolve_model(args: argparse.Namespace) -> None:
+    """Resolves the final upscaling model based on explicit model flags or type/scale heuristics."""
+    if args.model:
+        return  # User explicitly specified the model, nothing to resolve
+
+    # 1. Resolve --type auto
+    if args.type_alias == "auto":
+        print("Analyzing video to auto-detect content type...")
+        args.type_alias = analyze_video_type(Path(args.input_video))
+
+    # 2. Scale-aware model selection
+    requested_scale = args.scale
+    try:
+        paths = resolve_toolchain(args)
+        model_dir = paths.model_path
+    except Exception:
+        model_dir = None
+    
+    # helper to check if a model file actually exists before we assign it
+    def model_exists(m_name: str) -> bool:
+        if not model_dir:
+            return False
+        return (model_dir / f"{m_name}.param").exists() and (model_dir / f"{m_name}.bin").exists()
+
+    if args.type_alias == "animation":
+        if requested_scale == 2:
+            if model_exists("realesrgan-x2plus-anime"):
+                args.model = "realesrgan-x2plus-anime"
+            else:
+                print("Warning: realesrgan-x2plus-anime model not found. Falling back to realesrgan-x4plus-anime (with 2x outscale).")
+                args.model = "realesrgan-x4plus-anime"
+        else:
+            args.model = "realesrgan-x4plus-anime"
+    else:
+        # real-life
+        if requested_scale == 2:
+            if model_exists("realesrgan-x2plus"):
+                args.model = "realesrgan-x2plus"
+            else:
+                print("Warning: realesrgan-x2plus model not found. Falling back to realesrgan-x4plus (with 2x outscale).")
+                args.model = "realesrgan-x4plus"
+        else:
+            args.model = "realesrgan-x4plus"
+
+
+
 @_traced
 def main(argv: Optional[Sequence[str]] = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = parse_args(raw_argv)
 
-    # Map content type to underlying model unless explicitly overridden by hidden flag
-    if not args.model:
-        if args.type_alias == "animation":
-            args.model = "realesrgan-x4plus-anime"
-        else:
-            args.model = "realesrgan-x4plus"
+    resolve_model(args)
 
     cli_overrides = parse_cli_overrides(raw_argv)
     apply_quality_profile(args, cli_overrides)

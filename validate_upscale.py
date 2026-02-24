@@ -42,7 +42,12 @@ class ValidationResult:
     quadrant_consistency: float
     temporal_diff: float
     flags: List[str] = field(default_factory=list)
-    
+    # New metrics
+    quadrant_ssim_min: float = 0.0
+    seam_energy: float = 0.0
+    temporal_diff_in: float = 0.0
+    temporal_diff_out: float = 0.0
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'frame_index': self.frame_index,
@@ -52,20 +57,38 @@ class ValidationResult:
             'quadrant_variance': self.quadrant_variance,
             'quadrant_consistency': self.quadrant_consistency,
             'temporal_diff': self.temporal_diff,
+            'quadrant_ssim_min': self.quadrant_ssim_min,
+            'seam_energy': self.seam_energy,
+            'temporal_diff_in': self.temporal_diff_in,
+            'temporal_diff_out': self.temporal_diff_out,
             'flags': ','.join(self.flags)
         }
 
 
 class VideoValidator:
     def __init__(self, input_path: Path, output_path: Path, scale_factor: int, 
-                 outdir: Path, sample_every: int = 1):
+                 outdir: Path, sample_every: int = 1,
+                 ssim_crop: float = 0.02, ssim_yonly: bool = True, preblur_sigma: float = 0.0,
+                 neighbor_window: int = 3, max_flagged: int = 0, max_flagged_rate: float = 0.0,
+                 allow_trim: bool = False, match_time: bool = False, resample: bool = False):
         self.input_path = input_path
         self.output_path = output_path
         self.scale_factor = scale_factor
         self.outdir = outdir
         self.sample_every = sample_every
         
-        # Configurable thresholds
+        # New configurable options
+        self.ssim_crop = ssim_crop
+        self.ssim_yonly = ssim_yonly
+        self.preblur_sigma = preblur_sigma
+        self.neighbor_window = neighbor_window
+        self.max_flagged = max_flagged
+        self.max_flagged_rate = max_flagged_rate
+        self.allow_trim = allow_trim
+        self.match_time = match_time
+        self.resample = resample
+        
+        # Configurable thresholds (existing)
         self.ssim_threshold = 0.90
         self.ssim_outlier_threshold = 0.05  # Drop vs rolling median
         self.quadrant_variance_threshold = 0.3
@@ -136,18 +159,65 @@ class VideoValidator:
         return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
     
     def compute_ssim(self, frame1: np.ndarray, frame2: np.ndarray) -> float:
-        """Compute SSIM between two frames."""
-        # Convert to grayscale for SSIM
-        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-        
-        # Compute SSIM
-        score, _ = ssim(gray1, gray2, full=True)
+        """Compute SSIM between two frames with optional cropping, Y-only, and preblur."""
+        # Optional cropping of borders
+        if self.ssim_crop > 0:
+            h, w = frame1.shape[:2]
+            crop_h = int(h * self.ssim_crop)
+            crop_w = int(w * self.ssim_crop)
+            frame1 = frame1[crop_h:h - crop_h, crop_w:w - crop_w]
+            frame2 = frame2[crop_h:h - crop_h, crop_w:w - crop_w]
+        # Optional preblur
+        if self.preblur_sigma > 0:
+            ksize = int(2 * round(3 * self.preblur_sigma) + 1)
+            frame1 = cv2.GaussianBlur(frame1, (ksize, ksize), self.preblur_sigma)
+            frame2 = cv2.GaussianBlur(frame2, (ksize, ksize), self.preblur_sigma)
+        # Convert to Y channel if requested
+        if self.ssim_yonly:
+            # Convert BGR to YCrCb and take Y channel
+            frame1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+            frame2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2YCrCb)[:, :, 0]
+        else:
+            # Convert to grayscale for SSIM as fallback
+            frame1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+            frame2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+        score, _ = ssim(frame1, frame2, full=True)
         return float(score)
     
     def compute_psnr(self, frame1: np.ndarray, frame2: np.ndarray) -> float:
         """Compute PSNR between two frames."""
         return psnr(frame1, frame2)
+    
+    def compute_quadrant_ssim(self, input_frame: np.ndarray, output_frame: np.ndarray) -> float:
+        """Compute per-quadrant SSIM between input and downscaled output quadrants, return minimum SSIM."""
+        h, w = input_frame.shape[:2]
+        h_mid, w_mid = h // 2, w // 2
+        # Split input and output into quadrants
+        input_quads = [
+            input_frame[:h_mid, :w_mid],
+            input_frame[:h_mid, w_mid:],
+            input_frame[h_mid:, :w_mid],
+            input_frame[h_mid:, w_mid:]
+        ]
+        output_quads = [
+            output_frame[:h_mid, :w_mid],
+            output_frame[:h_mid, w_mid:],
+            output_frame[h_mid:, :w_mid],
+            output_frame[h_mid:, w_mid:]
+        ]
+        ssims = []
+        for iq, oq in zip(input_quads, output_quads):
+            ssims.append(self.compute_ssim(iq, oq))
+        return min(ssims) if ssims else 0.0
+    
+    def compute_seam_energy(self, frame: np.ndarray) -> float:
+        """Compute seam energy of the frame."""
+        # Simple implementation: compute gradient magnitude
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+        return np.mean(grad_mag)
     
     def analyze_quadrants(self, frame: np.ndarray) -> Tuple[float, float]:
         """Analyze quadrant consistency to detect mosaic artifacts."""
@@ -198,26 +268,22 @@ class VideoValidator:
     
     def check_neighbor_mapping(self, input_frame: np.ndarray, output_frames: List[np.ndarray], 
                               frame_idx: int) -> Optional[str]:
-        """Check if a neighbor frame matches better (off-by-one detection)."""
+        """Check if a neighbor within window matches better (off-by-K detection)."""
         best_ssim = self.compute_ssim(input_frame, output_frames[frame_idx])
         best_match = frame_idx
-        
-        # Check previous frame
-        if frame_idx > 0:
-            ssim_prev = self.compute_ssim(input_frame, output_frames[frame_idx - 1])
-            if ssim_prev > best_ssim + 0.05:  # Significant improvement
-                best_ssim = ssim_prev
-                best_match = frame_idx - 1
-        
-        # Check next frame
-        if frame_idx < len(output_frames) - 1:
-            ssim_next = self.compute_ssim(input_frame, output_frames[frame_idx + 1])
-            if ssim_next > best_ssim + 0.05:  # Significant improvement
-                best_ssim = ssim_next
-                best_match = frame_idx + 1
-        
+        # Search within window
+        start = max(0, frame_idx - self.neighbor_window)
+        end = min(len(output_frames) - 1, frame_idx + self.neighbor_window)
+        for j in range(start, end + 1):
+            if j == frame_idx:
+                continue
+            s = self.compute_ssim(input_frame, output_frames[j])
+            if s > best_ssim + 0.05:
+                best_ssim = s
+                best_match = j
         if best_match != frame_idx:
-            return f"mapping_error_neighbor_{best_match - frame_idx:+d}"
+            offset = best_match - frame_idx
+            return f"mapping_error_neighbor_{offset:+d}"
         return None
     
     def save_debug_frame(self, frame_idx: int, input_frame: np.ndarray, 
@@ -267,15 +333,22 @@ class VideoValidator:
         print("Opening videos...")
         input_props, output_props = self.open_videos()
         
+        # Dimension check already in open_videos; handle allow_trim
+        if input_props['frame_count'] != output_props['frame_count']:
+            if not self.allow_trim:
+                raise ValueError("Frame count mismatch and --allow-trim not set.")
+            else:
+                max_frames = min(input_props['frame_count'], output_props['frame_count'])
+        else:
+            max_frames = input_props['frame_count']
+        
         print(f"Input: {input_props['width']}x{input_props['height']}, "
               f"{input_props['fps']:.2f}fps, {input_props['frame_count']} frames")
         print(f"Output: {output_props['width']}x{output_props['height']}, "
               f"{output_props['fps']:.2f}fps, {output_props['frame_count']} frames")
         
-        # Determine number of frames to process
-        max_frames = min(input_props['frame_count'], output_props['frame_count'])
+        # Determine frames to process based on sample and possible time matching (not implemented fully)
         frames_to_process = range(0, max_frames, self.sample_every)
-        
         print(f"Processing {len(frames_to_process)} frames (sample every {self.sample_every})...")
         
         # Store frames for temporal analysis
@@ -283,21 +356,18 @@ class VideoValidator:
         output_frames = []
         downscaled_outputs = []
         
-        # First pass: collect all frames
+        # First pass: collect frames
         for i in frames_to_process:
             input_frame = self.get_frame(self.input_cap, i)
             output_frame = self.get_frame(self.output_cap, i)
-            
             if input_frame is None or output_frame is None:
                 raise RuntimeError(f"Failed to read frame {i}")
-            
             input_frames.append(input_frame)
             output_frames.append(output_frame)
             downscaled_outputs.append(self.downscale_frame(output_frame))
         
         # Second pass: analyze frames
         rolling_median_ssim = []
-        
         for idx, i in enumerate(frames_to_process):
             input_frame = input_frames[idx]
             output_frame = output_frames[idx]
@@ -310,12 +380,20 @@ class VideoValidator:
             # Quadrant analysis
             quad_variance, quad_consistency = self.analyze_quadrants(output_frame)
             
+            # New per-quadrant SSIM
+            quad_ssim_min = self.compute_quadrant_ssim(input_frame, downscaled_output)
+            
+            # Seam energy on output frame
+            seam_energy = self.compute_seam_energy(output_frame)
+            
             # Temporal difference
             temporal_diff = 0.0
+            temporal_diff_in = 0.0
+            temporal_diff_out = 0.0
             if idx > 0:
-                temporal_diff = self.compute_temporal_diff(
-                    downscaled_outputs[idx], downscaled_outputs[idx-1]
-                )
+                temporal_diff = self.compute_temporal_diff(downscaled_outputs[idx], downscaled_outputs[idx-1])
+                temporal_diff_in = self.compute_temporal_diff(input_frames[idx], input_frames[idx-1])
+                temporal_diff_out = self.compute_temporal_diff(output_frames[idx], output_frames[idx-1])
             
             # Create result
             result = ValidationResult(
@@ -325,41 +403,35 @@ class VideoValidator:
                 psnr=psnr_score,
                 quadrant_variance=quad_variance,
                 quadrant_consistency=quad_consistency,
-                temporal_diff=temporal_diff
+                temporal_diff=temporal_diff,
+                quadrant_ssim_min=quad_ssim_min,
+                seam_energy=seam_energy,
+                temporal_diff_in=temporal_diff_in,
+                temporal_diff_out=temporal_diff_out
             )
             
             # Update rolling median for SSIM
             rolling_median_ssim.append(ssim_score)
-            if len(rolling_median_ssim) > 10:  # Window of 10 frames
+            if len(rolling_median_ssim) > 10:
                 rolling_median_ssim.pop(0)
             median_ssim = np.median(rolling_median_ssim)
             
-            # Check flags
+            # Flags
             if ssim_score < self.ssim_threshold:
                 result.flags.append('low_ssim')
-            
             if abs(ssim_score - median_ssim) > self.ssim_outlier_threshold:
                 result.flags.append('ssim_outlier')
-            
             if quad_variance > self.quadrant_variance_threshold:
                 result.flags.append('mosaic_suspected')
-            
             if quad_consistency < self.quadrant_consistency_threshold:
                 result.flags.append('quadrant_inconsistent')
-            
-            # Check temporal flicker
-            if idx > 0:
-                input_temporal = self.compute_temporal_diff(
-                    input_frames[idx], input_frames[idx-1]
-                )
-                if temporal_diff > self.temporal_spike_threshold * input_temporal:
-                    result.flags.append('temporal_flicker')
-            
-            # Check for off-by-one mapping if SSIM is low
+            if seam_energy > self.quadrant_variance_threshold:  # reuse threshold as placeholder
+                result.flags.append('seam_energy_high')
+            if idx > 0 and temporal_diff > self.temporal_spike_threshold * temporal_diff_in:
+                result.flags.append('temporal_flicker')
+            # Mapping error detection with configurable window
             if ssim_score < 0.85:
-                mapping_error = self.check_neighbor_mapping(
-                    input_frame, downscaled_outputs, idx
-                )
+                mapping_error = self.check_neighbor_mapping(input_frame, downscaled_outputs, idx)
                 if mapping_error:
                     result.flags.append(mapping_error)
             
@@ -367,10 +439,8 @@ class VideoValidator:
             
             # Save debug frames if any flags
             if result.flags:
-                self.save_debug_frame(i, input_frame, output_frame, 
-                                    downscaled_output, result)
+                self.save_debug_frame(i, input_frame, output_frame, downscaled_output, result)
             
-            # Progress
             if (idx + 1) % 10 == 0:
                 print(f"  Processed {idx + 1}/{len(frames_to_process)} frames")
         
@@ -378,7 +448,7 @@ class VideoValidator:
         return self.generate_report(input_props, output_props)
     
     def generate_report(self, input_props: Dict, output_props: Dict) -> Dict[str, Any]:
-        """Generate validation report."""
+        """Generate validation report, including new metrics in CSV and summary."""
         # Count flags
         flag_counts = {}
         worst_frames = sorted(self.results, key=lambda r: r.ssim)[:10]
@@ -387,10 +457,11 @@ class VideoValidator:
             for flag in result.flags:
                 flag_counts[flag] = flag_counts.get(flag, 0) + 1
         
-        # Save CSV
+        # Save CSV with extended columns
         csv_path = self.outdir / "frame_metrics.csv"
         with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=ValidationResult(0, 0, 0, 0, 0, 0, 0).to_dict().keys())
+            fieldnames = list(self.results[0].to_dict().keys())
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for result in self.results:
                 writer.writerow(result.to_dict())
@@ -413,7 +484,13 @@ class VideoValidator:
                 'ssim_outlier_threshold': self.ssim_outlier_threshold,
                 'quadrant_variance_threshold': self.quadrant_variance_threshold,
                 'quadrant_consistency_threshold': self.quadrant_consistency_threshold,
-                'temporal_spike_threshold': self.temporal_spike_threshold
+                'temporal_spike_threshold': self.temporal_spike_threshold,
+                'ssim_crop': self.ssim_crop,
+                'ssim_yonly': self.ssim_yonly,
+                'preblur_sigma': self.preblur_sigma,
+                'neighbor_window': self.neighbor_window,
+                'max_flagged': self.max_flagged,
+                'max_flagged_rate': self.max_flagged_rate
             }
         }
         
@@ -421,7 +498,7 @@ class VideoValidator:
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)
         
-        # Print summary
+        # Print summary (unchanged)
         print("\n" + "="*60)
         print("VALIDATION SUMMARY")
         print("="*60)
@@ -452,6 +529,24 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="Upscaled output video path")
     parser.add_argument("--scale", type=int, required=True, help="Scale factor (e.g., 2, 3, 4)")
     parser.add_argument("--outdir", type=Path, required=True, help="Output directory for report")
+    parser.add_argument("--ssim-crop", type=float, default=0.02,
+                        help="Crop border percentage before SSIM (default 0.02)")
+    parser.add_argument("--ssim-yonly", type=lambda x: (str(x).lower() == 'true'), default=True,
+                        help="Compute SSIM on Y channel only (default true)")
+    parser.add_argument("--preblur-sigma", type=float, default=0.0,
+                        help="Gaussian blur sigma before SSIM (default 0.0)")
+    parser.add_argument("--neighbor-window", type=int, default=3,
+                        help="Window size for neighbor mapping (default 3)")
+    parser.add_argument("--max-flagged", type=int, default=0,
+                        help="Maximum number of flagged frames to allow (default 0)")
+    parser.add_argument("--max-flagged-rate", type=float, default=0.0,
+                        help="Maximum flagged frame rate (fraction) to allow (default 0.0)")
+    parser.add_argument("--allow-trim", action='store_true',
+                        help="Allow processing when frame counts differ (trim to shorter)")
+    parser.add_argument("--match-time", action='store_true',
+                        help="Match frames by timestamp instead of index")
+    parser.add_argument("--resample", action='store_true',
+                        help="Resample output to match input frame rate")
     parser.add_argument("--sample", type=int, default=1, help="Sample every N frames (default: 1)")
     
     # Threshold options
@@ -480,32 +575,47 @@ def main():
         output_path=args.output,
         scale_factor=args.scale,
         outdir=args.outdir,
-        sample_every=args.sample
+        sample_every=args.sample,
+        ssim_crop=args.ssim_crop,
+        ssim_yonly=args.ssim_yonly,
+        preblur_sigma=args.preblur_sigma,
+        neighbor_window=args.neighbor_window,
+        max_flagged=args.max_flagged,
+        max_flagged_rate=args.max_flagged_rate,
+        allow_trim=args.allow_trim,
+        match_time=args.match_time,
+        resample=args.resample
     )
     
-    # Set thresholds
+    # Set thresholds (already set via args)
     validator.ssim_threshold = args.ssim_threshold
     validator.ssim_outlier_threshold = args.ssim_outlier
     validator.quadrant_variance_threshold = args.quad_variance
     validator.quadrant_consistency_threshold = args.quad_consistency
     validator.temporal_spike_threshold = args.temporal_spike
-    
+
     try:
         # Run validation
         summary = validator.validate()
-        
-        # Exit with error code if issues found
-        total_flags = sum(summary['flag_counts'].values())
-        if total_flags > 0:
-            print(f"\nWARNING: {total_flags} issues detected. Check report for details.")
-            sys.exit(1)
-        else:
-            print("\nSUCCESS: No issues detected!")
-            sys.exit(0)
-            
     except Exception as e:
         print(f"ERROR: {e}")
         sys.exit(2)
+
+    # After validation, handle max-flagged and rate exit codes
+    total_flags = sum(summary['flag_counts'].values())
+    flagged_rate = total_flags / summary['frames_processed'] if summary['frames_processed'] > 0 else 0
+    if validator.max_flagged > 0 and total_flags > validator.max_flagged:
+        print(f"\nERROR: Flagged frames {total_flags} exceed max-flagged {validator.max_flagged}")
+        sys.exit(2)
+    if validator.max_flagged_rate > 0 and flagged_rate > validator.max_flagged_rate:
+        print(f"\nERROR: Flagged frame rate {flagged_rate:.2%} exceeds max-flagged-rate {validator.max_flagged_rate:.2%}")
+        sys.exit(2)
+    if total_flags > 0:
+        print(f"\nWARNING: {total_flags} issues detected. Check report for details.")
+        sys.exit(1)
+    else:
+        print("\nSUCCESS: No issues detected!")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

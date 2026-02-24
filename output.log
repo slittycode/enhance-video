@@ -1,0 +1,52 @@
+
+============================================================
+Video Upscaler - Real-ESRGAN
+============================================================
+Input:  /Users/christiansmith/code/projects/enhance ai/dummy.mp4
+Output: /Users/christiansmith/code/projects/enhance ai/dummy_upscaled_2x.mp4
+Scale:  2x
+Model:  realesrgan-x4plus
+Profile: max_quality
+GPU:    0
+Mode:   auto
+Scene adaptive: disabled
+Temporal filter: strong
+Guardrail: 72.0h
+Machine ID: darwin-arm64-b98ff02966d2bbde
+Calibration: /Users/christiansmith/.cache/enhance-ai/runtime_calibration.json
+Workspace: /var/folders/3b/6fzyrl1d4yl7y6ddwl10fbhw0000gn/T/video_upscale_70m3ckdz
+============================================================
+
+Analyzing video...
+  Resolution: 320x240
+  Framerate:  10.000 fps
+  Audio:      None
+  Duration:   1.0s
+  Time: 0.0s
+
+Preparing frames...
+  Frames: 10
+  Time: 0.0s
+
+Estimating runtime...
+  Candidate full_quality: 0.11 fps sampled, projected 1m 27.8s (source=calibration, 30m clip ~43h 53m 43.2s)
+  Guardrail target satisfied.
+
+Extracting audio...
+  Time: 0.0s
+
+Upscaling frames (batch mode)...
+  Time: 1m 28.3s (0.11 frames/sec)
+
+Reassembling output video...
+Applying temporal filter...
+  Time: 0.3s
+
+============================================================
+Complete!
+Total time: 1m 28.7s
+Output: /Users/christiansmith/code/projects/enhance ai/dummy_upscaled_2x.mp4
+Output size: 0.1 MB
+Projected runtime (full_quality): 1m 27.8s
+============================================================
+

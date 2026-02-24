@@ -36,6 +36,16 @@ To upscale 2D animation or cartoons, which require a specialized AI model to kee
 enhance-video input.mp4 --type animation
 ```
 
+For the absolute best reproducible results on stylized/anime content (disabling the strong temporal filter that can sometimes smudge fast-moving animation):
+```bash
+enhance-video input.mp4 -o out_anime.mp4 --type animation --profile custom --temporal-filter none
+```
+
+Alternatively, let the CLI auto-detect whether the content is real-life or animation by analyzing the frames for edge density and texture variance:
+```bash
+enhance-video input.mp4 --type auto
+```
+
 ## Core Workflows & Examples
 
 ### 1. Max Quality (Default)
