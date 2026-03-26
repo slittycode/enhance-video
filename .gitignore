@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 venv/
 .venv/
 .env
@@ -13,16 +14,26 @@ venv/
 
 # Pipeline workspace (extracted/upscaled frames)
 workspace/
+resume/
+test_in/
+test_out/
+test_out_anime/
+test_out_v3/
 input_frames/
 upscaled_frames/
 frame_*.jpg
 frame_*.png
+dummy.jpg
+test_frame_2x_direct.png
 
 # Test fixtures (generated video)
 tests/fixtures/*.mp4
+!tests/fixtures/tiny_input.mp4
 
 # Real-ESRGAN extracted binary (unzip realesrgan-macos.zip to create)
 enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos/
+enhance-ai/realesrgan-macos.zip
+enhance-ai/images/
 
 # C++ submodule stubs (not initialized)
 enhance-ai/src/ncnn/

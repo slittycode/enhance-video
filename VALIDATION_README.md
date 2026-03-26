@@ -13,7 +13,7 @@ The `validate_upscale.py` script performs comprehensive validation of upscaled v
 ## Installation
 
 ```bash
-pip install -r requirements_validation.txt
+python -m pip install -e ".[validation]"
 ```
 
 ## Usage
@@ -21,7 +21,7 @@ pip install -r requirements_validation.txt
 ### Basic Usage
 
 ```bash
-python validate_upscale.py \
+enhance-validate \
     --input input.mp4 \
     --output output.mp4 \
     --scale 2 \
@@ -62,7 +62,7 @@ python validate_upscale.py \
 ### Quick Test
 
 ```bash
-./test_validation.sh
+python -m pytest -q tests/test_validation_contract.py
 ```
 
 ## Thresholds Explained

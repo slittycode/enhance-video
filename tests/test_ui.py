@@ -1,7 +1,7 @@
-import pytest
-import contextlib
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import upscale_video
+
 
 def test_spinner_rich_available():
     # Force rich to be available

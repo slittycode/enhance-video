@@ -6,7 +6,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Dict, Tuple
 
 try:
     from PIL import Image
@@ -16,7 +15,7 @@ except ImportError:
     Image = None
 
 import upscale_video
-from toolchain import Toolchain, resolve_toolchain
+from toolchain import resolve_toolchain
 
 
 def compute_image_hash(image_path: Path) -> str:

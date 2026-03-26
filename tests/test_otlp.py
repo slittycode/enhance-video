@@ -1,10 +1,7 @@
-import os
-os.environ["ENABLE_OTLP_TRACING"] = "1"
-import upscale_video
-upscale_video.init_tracing()
+from enhance_video import telemetry
 
-# Add a fake span
-with upscale_video.tracer.start_as_current_span("test"):
-    pass
 
-print("Exiting...")
+def test_init_tracing_updates_package_tracer_reference():
+    telemetry.init_tracing()
+
+    assert telemetry.tracer is not None

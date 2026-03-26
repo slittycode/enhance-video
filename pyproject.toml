@@ -12,13 +12,35 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.4.2",
+    "ruff>=0.12.12"
+]
+validation = [
+    "opencv-python>=4.8.0",
+    "scikit-image>=0.21.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0"
+]
 telemetry = [
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp"
 ]
 
 [project.scripts]
-enhance-video = "upscale_video:main"
+enhance-video = "enhance_video:main"
+enhance-validate = "enhance_video.validation:main"
 
 [tool.setuptools]
 py-modules = ["upscale_video", "cli", "toolchain", "validate_upscale"]
+packages = ["enhance_video"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

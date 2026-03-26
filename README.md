@@ -9,18 +9,23 @@ A production-grade, local Real-ESRGAN video upscaler tuned for Apple machines. T
   ```bash
   brew install ffmpeg
   ```
-- **Real-ESRGAN (vulkan)**: The `realesrgan-ncnn-vulkan` binary is auto-detected from the bundled vendor directory (e.g. `enhance-ai/realesrgan-ncnn-vulkan-v0.2.0-macos`).
+- **Real-ESRGAN (vulkan)**: Provide it via one of the supported resolution paths:
+  - `--realesrgan-path`
+  - `ENHANCE_AI_REALESRGAN_PATH`
+  - `ENHANCE_AI_VENDOR_ROOT`
+  - `~/.cache/enhance-ai/vendor`
+  - `PATH`
 
 ## Installation
 
-Install the package globally in editable mode directly from the project directory. This enables the `enhance-video` command system-wide.
+Install the package in editable mode from the project directory. This exposes `enhance-video` and `enhance-validate`.
 
 ```bash
 cd path/to/project/enhance-ai
-pip install -e .
+python -m pip install -e ".[dev,validation,telemetry]"
 ```
 
-*Note: The installation will automatically pull in the required `rich` dependency.*
+The default install provides the CLI and `rich`. The `validation` extra provides OpenCV, NumPy, scikit-image, and Pillow for offline validation.
 
 ## Quick Start
 
@@ -135,6 +140,13 @@ enhance-video input.mp4 --scene-adaptive --plan-only > plan.json
 - `--force` - Ignore cached frames and re-upscale everything.
 - `--jobs` - Real-ESRGAN thread tuple (e.g., `2:2:2` for load:proc:save).
 - `--cleanup-work-dir` - Automatically delete intermediate artifacts when the run completes.
+
+## Environment Variables
+
+- `ENHANCE_AI_REALESRGAN_PATH` - Explicit path to the Real-ESRGAN binary.
+- `ENHANCE_AI_MODEL_PATH` - Explicit path to the model directory.
+- `ENHANCE_AI_VENDOR_ROOT` - Root folder containing cached/extracted Real-ESRGAN assets.
+- `ENHANCE_AI_CACHE_ROOT` - Override the default `~/.cache/enhance-ai` root.
 
 ## Tracing & Profiling (Optional)
 

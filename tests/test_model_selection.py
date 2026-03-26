@@ -1,17 +1,14 @@
 import argparse
-import tempfile
-import cv2
-import numpy as np
-import shutil
 import pathlib
-import subprocess
 from unittest import mock
 
-import pytest
+import cv2
+import numpy as np
 
-from cli import parse_args, parse_cli_overrides, apply_quality_profile
-from upscale_video import resolve_model, analyze_video_type
+from cli import apply_quality_profile, parse_args, parse_cli_overrides
 from toolchain import Toolchain
+from upscale_video import analyze_video_type, resolve_model
+
 
 def test_explicit_override_precedence():
     # User applies max_quality but overrides temporal-filter and model explicitly

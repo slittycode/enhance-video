@@ -1,0 +1,41 @@
+"""Media pipeline helpers exposed as part of the package surface."""
+
+from enhance_video.pipeline import (
+    INPUT_FRAME_GLOB,
+    INPUT_FRAME_PATTERN,
+    OUTPUT_FRAME_GLOB,
+    OUTPUT_FRAME_PATTERN,
+    VideoInfo,
+    apply_temporal_filter,
+    concat_scene_chunks,
+    extract_audio,
+    extract_frames,
+    fallback_resize_frame,
+    get_codec_flags,
+    get_temporal_filter_expression,
+    get_video_info,
+    mux_audio_to_video,
+    natural_key,
+    parse_framerate,
+    reassemble_video,
+)
+
+__all__ = [
+    "INPUT_FRAME_GLOB",
+    "INPUT_FRAME_PATTERN",
+    "OUTPUT_FRAME_GLOB",
+    "OUTPUT_FRAME_PATTERN",
+    "VideoInfo",
+    "apply_temporal_filter",
+    "concat_scene_chunks",
+    "extract_audio",
+    "extract_frames",
+    "fallback_resize_frame",
+    "get_codec_flags",
+    "get_temporal_filter_expression",
+    "get_video_info",
+    "mux_audio_to_video",
+    "natural_key",
+    "parse_framerate",
+    "reassemble_video",
+]

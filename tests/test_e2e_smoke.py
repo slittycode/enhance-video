@@ -6,8 +6,10 @@ and the overall orchestration path — but they do NOT invoke the Real-ESRGAN
 binary (which may not be available in CI).
 """
 
-import json
 import io
+import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,10 +17,44 @@ from unittest import mock
 
 import upscale_video
 
-FIXTURE_VIDEO = Path(__file__).resolve().parent / "fixtures" / "tiny_input.mp4"
+FIXTURE_VIDEO = Path(tempfile.gettempdir()) / "enhance_video_tiny_input.mp4"
 
 
-@unittest.skipUnless(FIXTURE_VIDEO.exists(), "requires tests/fixtures/tiny_input.mp4")
+def ensure_fixture_video() -> Path | None:
+    if FIXTURE_VIDEO.exists():
+        return FIXTURE_VIDEO
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        return None
+
+    subprocess.run(
+        [
+            ffmpeg_bin,
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10",
+            "-t",
+            "2",
+            "-pix_fmt",
+            "yuv420p",
+            str(FIXTURE_VIDEO),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return FIXTURE_VIDEO
+
+
+AVAILABLE_FIXTURE = ensure_fixture_video()
+
+
+@unittest.skipUnless(AVAILABLE_FIXTURE is not None, "requires ffmpeg to build smoke fixture")
 class TestE2ESmoke(unittest.TestCase):
     """End-to-end smoke tests with a real video file."""
 
@@ -76,7 +112,7 @@ class TestE2ESmoke(unittest.TestCase):
             self.assertEqual(len(png_files), 0, "Expected JPEG frames, not PNG")
 
 
-@unittest.skipUnless(FIXTURE_VIDEO.exists(), "requires tests/fixtures/tiny_input.mp4")
+@unittest.skipUnless(AVAILABLE_FIXTURE is not None, "requires ffmpeg to build smoke fixture")
 class TestNewHelpers(unittest.TestCase):
     """Tests for newly added helper functions."""
 

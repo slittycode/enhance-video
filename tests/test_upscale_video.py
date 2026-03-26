@@ -1,9 +1,9 @@
+import io
+import json
 import stat
+import subprocess
 import tempfile
 import unittest
-import json
-import io
-import subprocess
 from pathlib import Path
 from unittest import mock
 
